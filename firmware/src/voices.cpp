@@ -24,6 +24,8 @@ constexpr int kPartials = 8;
 constexpr float kRatio[kPartials] = {1.0f, 2.0f, 3.0f, 4.0f,
                                      5.0f, 6.0f, 1.0f, 2.0f};
 
+int   cable_mode = kCableOff;
+
 float sr        = 48000.0f;
 float inv_sr    = 1.0f / 48000.0f;
 int   block     = 48;
@@ -165,14 +167,17 @@ struct Voice
     float wet, wet_t;
     float cab[wfc::kVoices], cab_t[wfc::kVoices];
 
-    // The LFO, and the three depths it adds through
-    uint32_t lph;
-    uint32_t linc;
-    float    lrate, lrate_t;
-    float    l_dly, l_dly_t;
-    float    l_fb, l_fb_t;
-    float    l_pre, l_pre_t;
-    float    lfo;   // its value this tick
+    // The mod, and the three depths it adds through
+    float    mspeed, mspeed_t;   // the response speed WFC chose, in Hz
+    float    fast, slow;       // the follower's two envelopes
+    float    lvl_sum;          // |loop| over the last block
+    int      lvl_n;
+    // What Process resolved for this block, kept for the display
+    float    eff_dly, eff_fb, eff_pre, pan_now, depth_now;
+    float    m_dly, m_dly_t;
+    float    m_fb, m_fb_t;
+    float    m_pre, m_pre_t;
+    float    mod;   // its value this tick
 
     // What the loop's distortion put out last sample: the feedback path and
     // every cable tap read this, which is what breaks the algebraic loop
@@ -190,7 +195,7 @@ float SLOW_BSS delay_mem[wfc::kVoices][kDelayMax];
 struct
 {
     float dt;
-    float vca, vcut, fb, lcut, pre, wet, cab, lfo_rate, lfo_depth, dly;
+    float vca, vcut, fb, lcut, pre, wet, cab, mod_speed, mod_depth, dly;
     float fresh;
 } co = {};
 
@@ -205,8 +210,8 @@ void Recoeff(float dt, float glide)
     co.pre       = Coeff(0.1f, dt);
     co.wet       = Coeff(0.1f, dt);
     co.cab       = Coeff(0.1f, dt);
-    co.lfo_rate  = Coeff(0.3f, dt);
-    co.lfo_depth = Coeff(0.08f, dt);
+    co.mod_speed  = Coeff(0.3f, dt);
+    co.mod_depth = Coeff(0.08f, dt);
     co.dly       = Coeff(glide, dt);
 }
 
@@ -267,7 +272,9 @@ void Init(float sample_rate, int block_size)
         vo.llp.Set(2000.0f, 0.5f);
         vo.dly = vo.dly_t = 0.2f;
         vo.pre = vo.pre_t = 1.0f;
-        vo.lrate = vo.lrate_t = 0.5f;
+        vo.mspeed = vo.mspeed_t = 0.5f;
+        vo.fast = vo.slow = vo.lvl_sum = 0.0f;
+        vo.lvl_n              = 0;
         for(int k = 0; k < kPartials; k++)
         {
             Partial& p = vo.p[k];
@@ -287,15 +294,27 @@ void Init(float sample_rate, int block_size)
         // fixed spread of (i / 3 * 2 - 1) * .6
         vo.pan_base = ((float)i / (float)(wfc::kVoices - 1) * 2.0f - 1.0f)
                       * 0.6f;
-        // Its own slow drift, deliberately not the LFO: a static image in an
+        // Its own slow drift, deliberately not the mod: a static image in an
         // instrument made of slow movement is the thing that sounds fixed, and
-        // this has to be there whatever the LFO knob is doing
+        // this has to be there whatever the mod knob is doing
         vo.pan_ph  = (uint32_t)(Rand() * 4294967296.0f);
         vo.pan_inc = (uint32_t)((0.02f + Rand() * 0.04f) * 4294967296.0f
                                 * (float)block * inv_sr);
         vo.pan_l = vo.pan_r = 0.70710678f;
     }
     Recoeff((float)block * inv_sr, wfc::DelayGlide());
+}
+
+void SetCableMode(int m)
+{
+    cable_mode = m >= 0 && m < kCableCount ? m : kCableOff;
+    wfc::SetCableMode(cable_mode);
+}
+int  CableMode_() { return cable_mode; }
+const char* CableName(int m)
+{
+    static const char* n[kCableCount] = {"off", "feed", "mod"};
+    return m >= 0 && m < kCableCount ? n[m] : "?";
 }
 
 void SetPitch(int i, float hz, bool snap)
@@ -308,6 +327,13 @@ void SetPitch(int i, float hz, bool snap)
 
 float Pitch(int i) { return v[i].hz; }
 float Amp(int i) { return v[i].amp; }
+float EffDly(int i) { return v[i].eff_dly; }
+float EffFb(int i) { return v[i].eff_fb; }
+float EffDrv(int i) { return v[i].eff_pre; }
+float Mod(int i) { return v[i].mod; }
+float ModDepth(int i) { return v[i].depth_now; }
+float Pan(int i) { return v[i].pan_now; }
+float LoopLevel(int i) { return v[i].fast; }
 
 float Level()
 {
@@ -327,10 +353,10 @@ void Control(float now, float dt)
     const float base  = wfc::DelayBase();
     const float fbm   = wfc::FbMul();
     const float drvm  = wfc::DrvMul();
-    const float lfom  = wfc::LfoMul();
+    const float modm  = wfc::ModMul();
     const float lcut  = wfc::LoopCut();
     const float vcm   = wfc::VoiceCutMul();
-    const float lrate0 = wfc::LfoRate0();
+    const float mspeed0 = wfc::ModSpeed0();
     const float atk   = wfc::AttackT();
     const float rel   = wfc::ReleaseT();
     // The longest delay the buffer can serve, with a sample spare for the
@@ -368,7 +394,7 @@ void Control(float now, float dt)
         // What the wave has actually delivered to this voice
         const int   tile = wfc::ShownTile(i);
         const int   po   = wfc::ShownPatch(i);
-        const int   lo   = wfc::ShownLfo(i);
+        const int   lo   = wfc::ShownMod(i);
         const bool  skew = wfc::ShownSkew(i) != 0;
         const float F = wfc::FL[wfc::TileF(tile)];
         const float R = wfc::RL[wfc::TileR(tile)];
@@ -420,18 +446,19 @@ void Control(float now, float dt)
                           150.0f,
                           12000.0f);
 
-        // The LFO rides the envelope, so a silent voice's line is still
-        const float dpe = wfc::DP[wfc::LfoDepth(lo)] * lfom * vo.amp;
-        vo.lrate_t      = lrate0 * wfc::LR[wfc::LfoRate(lo)];
-        vo.l_dly_t      = dly * 0.08f * dpe;
-        vo.l_fb_t       = 0.2f * dpe;
-        vo.l_pre_t      = pre * 0.35f * dpe;
+        // The mod rides the envelope, so a silent voice's line is still
+        const float dpe = wfc::DP[wfc::ModDepthOf(lo)] * modm * vo.amp;
+        vo.mspeed_t      = mspeed0 * wfc::MS[wfc::ModSpeedOf(lo)];
+        vo.m_dly_t      = dly * 0.08f * dpe;
+        vo.m_fb_t       = 0.2f * dpe;
+        vo.depth_now    = dpe;
+        vo.m_pre_t      = pre * 0.35f * dpe;
 
         // The cable, which is live only while its SOURCE voice sounds
         const int tgt = wfc::OptTarget(po);
         for(int j = 0; j < wfc::kVoices; j++)
             vo.cab_t[j] = (on && j == tgt)
-                              ? wfc::AMT[wfc::OptAmt(po)] * sqrtf(pre) * 0.8f
+                              ? wfc::AMT[wfc::OptAmt(po)] * sqrtf(pre) * 1.3f
                               : 0.0f;
 
         Approach(vo.dly, vo.dly_t, co.dly);
@@ -441,27 +468,38 @@ void Control(float now, float dt)
         Approach(vo.wet, vo.wet_t, co.wet);
         Approach(vo.vca, vo.vca_t, co.vca);
         Approach(vo.vcut, vo.vcut_t, co.vcut);
-        Approach(vo.lrate, vo.lrate_t, co.lfo_rate);
-        Approach(vo.l_dly, vo.l_dly_t, co.lfo_depth);
-        Approach(vo.l_fb, vo.l_fb_t, co.lfo_depth);
-        Approach(vo.l_pre, vo.l_pre_t, co.lfo_depth);
+        Approach(vo.mspeed, vo.mspeed_t, co.mod_speed);
+        Approach(vo.m_dly, vo.m_dly_t, co.mod_depth);
+        Approach(vo.m_fb, vo.m_fb_t, co.mod_depth);
+        Approach(vo.m_pre, vo.m_pre_t, co.mod_depth);
         for(int j = 0; j < wfc::kVoices; j++)
             Approach(vo.cab[j], vo.cab_t[j], co.cab);
 
-        // The LFO advances once a tick: it is sub-Hz to a few Hz, so there is
-        // nothing to gain from running it per sample.
-        // ponytail: block-rate modulation, ~1 ms steps. Fine for this LFO and
-        // for cross-FEED cables, which carry audio and modulate nothing. If
-        // the cables become cross-MODULATION, the modulator is audio and this
-        // has to move into Process() per sample.
-        vo.linc = (uint32_t)(vo.lrate * 4294967296.0f * dt);
-        vo.lph += vo.linc;
-        vo.lfo = SinQ(vo.lph);
+        // THE MODULATOR. The voice follows its own loop: rising or falling,
+        // not loud or quiet, because the difference of two envelopes is
+        // self-centring and needs no calibration against level.
+        //
+        // WFC's rate class is spent on how FAST this voice reacts rather than
+        // on an oscillator frequency -- there is no oscillator any more. One
+        // voice twitches, another heaves, and the rule layer keeps its shape.
+        //
+        // ponytail: block-rate, ~1 ms steps. Fine for an envelope follower.
+        // The cross-MODULATION cables are the per-sample path; see Process().
+        const float lvl = vo.lvl_n ? vo.lvl_sum / (float)vo.lvl_n : 0.0f;
+        vo.lvl_sum      = 0.0f;
+        vo.lvl_n        = 0;
+        const float tau = 0.4f / (vo.mspeed > 0.05f ? vo.mspeed : 0.05f);
+        Approach(vo.fast, lvl, Coeff(tau, dt));
+        Approach(vo.slow, lvl, Coeff(tau * 8.0f, dt));
+        // 45 is measured: at 14 this sat at an rms of 0.09 and read as
+        // nothing happening at all
+        vo.mod = Shape((vo.fast - vo.slow) * 45.0f);
 
         // Where the voice is, drifting slowly
         vo.pan_ph += vo.pan_inc;
         const float pan = Clamp(vo.pan_base + SinQ(vo.pan_ph) * 0.32f,
                                 -1.0f, 1.0f);
+        vo.pan_now    = pan;
         const float a = (pan + 1.0f) * 0.25f * 3.14159265f;
         vo.pan_l      = cosf(a);
         vo.pan_r      = sinf(a);
@@ -476,28 +514,32 @@ void Control(float now, float dt)
 void Process(float* out_l, float* out_r, int n, const float* in,
              float in_mix)
 {
-    // Resolved once a block: the LFO and every smoothed value hold still
+    // Resolved once a block: the mod and every smoothed value hold still
     // across it, which is what makes the per-sample loop cheap
     float dsamp[wfc::kVoices], dsamp2[wfc::kVoices], fbg[wfc::kVoices],
         preg[wfc::kVoices], postg[wfc::kVoices];
     for(int i = 0; i < wfc::kVoices; i++)
     {
         Voice& vo = v[i];
-        // The LFO ADDS to these, exactly as a Web Audio LFO connected to an
+        // The mod ADDS to these, exactly as a Web Audio mod connected to an
         // AudioParam does
-        const float d = (vo.dly + vo.lfo * vo.l_dly) * sr;
+        const float d = (vo.dly + vo.mod * vo.m_dly) * sr;
         dsamp[i]      = Clamp(d, 2.0f, (float)(kDelayMax - 2));
         // A second tap 1.3% further back: at a fifth of a second that is a
         // couple of milliseconds, so the loop reads as a wide source instead
         // of one panned point. It never feeds back -- the loop is unchanged.
         dsamp2[i] = Clamp(dsamp[i] * 1.013f, 2.0f, (float)(kDelayMax - 2));
-        fbg[i]        = Clamp(vo.fb + vo.lfo * vo.l_fb, 0.0f, 1.3f);
-        preg[i]       = vo.pre + vo.lfo * vo.l_pre;
+        fbg[i]        = Clamp(vo.fb + vo.mod * vo.m_fb, 0.0f, 1.3f);
+        preg[i]       = vo.pre + vo.mod * vo.m_pre;
         if(preg[i] < 0.01f)
             preg[i] = 0.01f;
-        // post is NOT modulated: that asymmetry is what lets the LFO change
+        // post is NOT modulated: that asymmetry is what lets the mod change
         // the loop's gain and not just its colour
         postg[i] = 1.0f / vo.pre;
+
+        vo.eff_dly = dsamp[i] * inv_sr;
+        vo.eff_fb  = fbg[i];
+        vo.eff_pre = preg[i];
     }
 
     for(int s = 0; s < n; s++)
@@ -528,18 +570,41 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             // The voice itself, before its line
             const float dry = vo.vlp.Process(src) * vo.vca;
 
-            // What goes into the line: the voice, its own feedback, and any
-            // cable pointed at it
-            float in = dry + prev[i] * fbg[i];
+            // What the cables pointed at this voice are carrying. Feed adds
+            // their audio to the line; Mod spends it on the tap position and
+            // the feedback instead. Mod has to be per sample because the
+            // modulator IS audio -- there is nothing slow about it.
+            float fed = 0.0f, dmod = 0.0f, fmod = 0.0f;
             for(int j = 0; j < wfc::kVoices; j++)
-                if(j != i)
-                    in += prev[j] * v[j].cab[i];
+            {
+                if(j == i || v[j].cab[i] == 0.0f)
+                    continue;
+                const float c = prev[j] * v[j].cab[i];
+                if(cable_mode == kCableMod)
+                {
+                    // A FRACTION of the tap, not a fixed number of samples:
+                    // 0.004 s of a 230 ms delay is 0.17%, about three cents,
+                    // which is why this mode was inaudible. A quarter of the
+                    // tap is a real bend, and the Clamp below keeps it legal.
+                    dmod += c * dsamp[i] * 0.3f;
+                    fmod += c * 0.8f;
+                }
+                else
+                    fed += c;
+            }
+
+            // What goes into the line: the voice, its own feedback, and
+            // whatever the cables fed it
+            const float in = dry + Clamp(fbg[i] + fmod, 0.0f, 1.3f) * prev[i]
+                             + fed;
 
             // Write, then read `dsamp` samples back, interpolated because the
-            // LFO and the repair glide both move the tap
+            // mod and the repair glide both move the tap
             vo.line[vo.wr] = in;
-            const int   di  = (int)dsamp[i];
-            const float fr  = dsamp[i] - (float)di;
+            const float ds  = Clamp(dsamp[i] + dmod, 2.0f,
+                                    (float)(kDelayMax - 2));
+            const int   di  = (int)ds;
+            const float fr  = ds - (float)di;
             const int   i0  = (vo.wr - di + kDelayMax) % kDelayMax;
             const int   i1  = (i0 - 1 + kDelayMax) % kDelayMax;
             const float out = vo.line[i0] + (vo.line[i1] - vo.line[i0]) * fr;
@@ -548,6 +613,7 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             const int   j0  = (vo.wr - dj + kDelayMax) % kDelayMax;
             const int   j1  = (j0 - 1 + kDelayMax) % kDelayMax;
             const float o2  = vo.line[j0] + (vo.line[j1] - vo.line[j0]) * fj;
+
             vo.wr           = (vo.wr + 1) % kDelayMax;
 
             // The loop's filters and its distortion
@@ -557,6 +623,8 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             const float sh  = Shape(f * preg[i]);
             const float pst = sh * postg[i];
             vo.post_prev    = pst;
+            vo.lvl_sum += pst < 0.0f ? -pst : pst;
+            vo.lvl_n++;
 
             // Dry voice and wet line both go to the bus, panned together.
             // In input mode the dry is dropped here: the box passes the input

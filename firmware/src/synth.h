@@ -53,6 +53,11 @@ float Level();
 bool ShiftGain(int delta);
 float GainDb();
 
+// What a cable carries (voices::CableMode)
+void SetCableMode(int m);
+int  CableMode();
+const char* CableName(int m);
+
 // Break a rule now, or settle everything now
 void Break();
 void Settle();

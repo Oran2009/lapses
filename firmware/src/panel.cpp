@@ -1,6 +1,7 @@
 #include "panel.h"
 
 #include "synth.h"
+#include "voices.h"
 
 #include "dev/mpr121.h"
 #include "hid/switch3.h"
@@ -106,17 +107,13 @@ void Poll()
     // Up holds the solver: down latches the pads, up latches the state
     synth::Freeze(a == Switch3::POS_UP);
 
-    // S09/S10 makes the rules playable instead of only observed
-    static int last_b = -1;
-    const int  b      = switch_b.Read();
-    if(b != last_b)
-    {
-        if(b == Switch3::POS_UP)
-            synth::Break();
-        else if(b == Switch3::POS_DOWN)
-            synth::Settle();
-        last_b = b;
-    }
+    // S09/S10 picks what a cable carries. Centre is none at all, up is
+    // cross-modulation, down is cross-feed; the two live positions also turn
+    // on rule 6, which leaves no sounding voice out of the patching.
+    const int b = switch_b.Read();
+    synth::SetCableMode(b == Switch3::POS_UP     ? voices::kCableMod
+                        : b == Switch3::POS_DOWN ? voices::kCableFeed
+                                                 : voices::kCableOff);
 
     const uint16_t changed = (uint16_t)(pad_state ^ last_pads);
     for(int i = 0; i < kPads; i++)

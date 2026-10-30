@@ -1,7 +1,7 @@
 // THE SOLVER
 //
 // WFC decides every sounding voice's delay/feedback/drive tile, its patch
-// cable and its LFO, and keeps the sounding voices consistent with each other
+// cable and its mod, and keeps the sounding voices consistent with each other
 // under five rules. The six knobs scale the values those rules read, so
 // turning a knob up loads its rule until it breaks. WFC then repairs it, and
 // the repair arrives as a wave across the voices, one hop apart.
@@ -32,11 +32,12 @@ constexpr int   kTiles = 5 * 5 * 4;
 constexpr float AMT[3]  = {0.3f, 0.6f, 0.9f};
 constexpr int   kOpts   = 1 + kVoices * 3;
 
-// LFO rate classes (multiples of the base rate) and depth classes.
-// option = rate class * 4 + depth class
-constexpr float LR[5]  = {1.0f, 4.0f / 3, 3.0f / 2, 2.0f, 3.0f};
+// Mod SPEED classes (multiples of the base) and depth classes. Speed is how
+// fast a voice's follower reacts, not an oscillator's frequency -- there is
+// no oscillator. option = speed class * 4 + depth class
+constexpr float MS[5]  = {1.0f, 4.0f / 3, 3.0f / 2, 2.0f, 3.0f};
 constexpr float DP[4]  = {0.0f, 0.3f, 0.6f, 1.0f};
-constexpr int   kLfoOpts = 5 * 4;
+constexpr int   kModOpts = 5 * 4;
 
 inline int TileD(int t) { return t / 20; }
 inline int TileF(int t) { return (t % 20) / 4; }
@@ -46,13 +47,13 @@ constexpr int kDefaultTile = 0 * 20 + 1 * 4 + 1;
 
 inline int OptTarget(int o) { return o == 0 ? -1 : (o - 1) / 3; }
 inline int OptAmt(int o) { return (o - 1) % 3; }
-inline int LfoRate(int o) { return o / 4; }
-inline int LfoDepth(int o) { return o % 4; }
+inline int ModSpeedOf(int o) { return o / 4; }
+inline int ModDepthOf(int o) { return o % 4; }
 
 // The six knobs, each 0..1 (4.2)
 struct Knobs
 {
-    float delay, fb, drive, filter, lfo, safe, unrest, tune;
+    float delay, fb, drive, filter, mod, safe, unrest, tune;
 };
 
 // What the rules allow at the current strictness (4.4)
@@ -60,6 +61,10 @@ struct Limits
 {
     float Fpair, Dpair, Fself, Lpeak, gap;
     bool  ratio_on, cycle_on;
+    // The cable rules, which only exist while the cables are switched on
+    float Iflood;        // feedback plus everything fed in, per voice
+    int   fan_in;        // how many cables one voice may receive
+    bool  connected_on;  // one structure through all of them, not two
 };
 
 // A rule that is broken right now, and on which voices
@@ -69,6 +74,7 @@ enum BreakType
     kSwell,
     kFuzz,
     kWobble,
+    kFlood,
     kCable,
     kBreakTypes
 };
@@ -93,10 +99,10 @@ float DelayGlide();
 float HopSeconds();
 float ReleaseT();
 float AttackT();
-float LfoRate0();
+float ModSpeed0();
 float FbMul();
 float DrvMul();
-float LfoMul();
+float ModMul();
 float LoopCut();
 float VoiceCutMul();
 float LapseChance();
@@ -105,6 +111,16 @@ float LapseChance();
 // land and a press still rolls its voice, so the texture freezes without the
 // panel going dead.
 void SetFrozen(bool on);
+
+// With cables switched off nothing patches and rule 4 is vacuous. With them on
+// an extra rule applies: no sounding voice may be left out of the patching,
+// as sender or as receiver. It needs two voices to be satisfiable at all, so
+// it is only enforced from two upwards.
+// 0 none, 1 cross-feed, 2 cross-modulation (voices::CableMode). The two live
+// modes do not get the same rules: a cycle in feed is a gain path and is
+// forbidden, a cycle in mod is a pair of coupled oscillators and is the point.
+void SetCableMode(int m);
+int  CableMode();
 bool Frozen();
 float UnrestRate();
 
@@ -122,14 +138,14 @@ float StartedAt(int v);
 // What WFC has decided
 int  Tile(int v);
 int  Patch(int v);
-int  Lfo(int v);
+int  Mod(int v);
 int  Skew(int v);
 
 // What the audio has reached: the wave arrives over time (4.6b). Audio reads
 // these, never the logical copy above.
 int  ShownTile(int v);
 int  ShownPatch(int v);
-int  ShownLfo(int v);
+int  ShownMod(int v);
 int  ShownSkew(int v);
 
 // True once per voice when an event lands on it, for the display/LED flash.

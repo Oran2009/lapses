@@ -105,11 +105,11 @@ static void TestKnobFormulas()
     Near("hopSeconds", HopSeconds(), 0.185f, 5e-4f);
     Near("releaseT", ReleaseT(), 1.501f, 1e-3f);
     Near("attackT", AttackT(), 0.243f, 1e-3f);
-    Near("lfoRate0", LfoRate0(), 0.541f, 1e-3f);
+    Near("modSpeed0", ModSpeed0(), 0.541f, 1e-3f);
     Near("delayGlide", DelayGlide(), 0.139f, 5e-4f);
     Near("fbMul", FbMul(), 1.0f);
     Near("drvMul", DrvMul(), 0.76f);
-    Near("lfoMul", LfoMul(), 0.75f);
+    Near("modMul", ModMul(), 0.75f);
     Near("loopCut", LoopCut(), 1722.0f, 1.0f);
     Near("voiceCutMul", VoiceCutMul(), 8.375f, 1e-3f);
     Near("lapseChance", LapseChance(), 0.1f, 5e-4f);
@@ -269,17 +269,21 @@ static void TestBreaksBreakAndHeal()
 {
     printf("each break breaks its own rule, and heal takes it back\n");
     const BreakType types[kBreakTypes]
-        = {kEcho, kSwell, kFuzz, kWobble, kCable};
+        = {kEcho, kSwell, kFuzz, kWobble, kFlood, kCable};
     for(int ti = 0; ti < kBreakTypes; ti++)
     {
         int hit = 0, clean_after = 0;
         for(uint32_t seed = 1; seed <= 40; seed++)
         {
             Init(seed);
+            // The cable breaks need somewhere for a cable to exist
+            voices::SetCableMode(types[ti] == kCable || types[ti] == kFlood
+                                     ? voices::kCableFeed
+                                     : voices::kCableOff);
             K().safe = 0.95f;
             K().unrest = 0.0f;
-            // The wobble break needs the LFO audible for rule 5 to bite
-            K().lfo = 1.0f;
+            // The wobble break needs the mod audible for rule 5 to bite
+            K().mod = 1.0f;
             RebuildRules();
             float now = 1.0f;
             for(int v = 0; v < kVoices; v++)
@@ -310,6 +314,7 @@ static void TestBreaksBreakAndHeal()
                BreakName(types[ti]), hit, clean_after);
         Check("break is audible as its own rule", hit >= 38);
         Check("heal clears the break", clean_after >= 38);
+        voices::SetCableMode(voices::kCableOff);
     }
 }
 
@@ -344,7 +349,7 @@ static void TestWaveIsStaggered()
         Tick(now + (float)step * hop * 0.5f);
         for(int v = 0; v < kVoices; v++)
             if(landed_at[v] < 0 && ShownTile(v) == Tile(v)
-               && ShownLfo(v) == Lfo(v))
+               && ShownMod(v) == Mod(v))
                 landed_at[v] = step;
     }
     int first = 99, last = -1;
@@ -372,7 +377,7 @@ static void TestKnobsLoadTheirRule()
     const int kRuns = 200;
     for(int nv = 2; nv <= kVoices; nv++)
     {
-        int hit[4] = {0, 0, 0, 0};   // drive, feedback, delay, lfo
+        int hit[4] = {0, 0, 0, 0};   // drive, feedback, delay, mod
         int unsat[4] = {0, 0, 0, 0};
         for(uint32_t seed = 1; seed <= (uint32_t)kRuns; seed++)
         {
@@ -400,12 +405,12 @@ static void TestKnobsLoadTheirRule()
                 float     to, back;
                 BreakType rule;
             } probe[4] = {
-                // The LFO goes first, because only a PRESS ever gives a voice
-                // LFO depth: RepairLfo charges +10 for changing a voice's
+                // The mod goes first, because only a PRESS ever gives a voice
+                // mod depth: RepairMod charges +10 for changing a voice's
                 // option, so a heal preserves or removes depth but never adds
                 // it. Probe rule 5 after the other knobs have forced a few
                 // heals and every depth has already decayed to 0.
-                {&K().lfo, 1.0f, 0.5f, kWobble},
+                {&K().mod, 1.0f, 0.5f, kWobble},
                 {&K().drive, 1.0f, 0.3f, kFuzz},
                 {&K().fb, 1.0f, 0.5f, kSwell},
                 {&K().delay, 0.0f, 0.6f, kEcho},
@@ -456,10 +461,10 @@ static void TestKnobsLoadTheirRule()
             }
         }
         printf("  %d voices: drive %3d/%d  feedback %3d/%d  delay %3d/%d  "
-               "lfo %3d/%d",
+               "mod %3d/%d",
                nv, hit[1], kRuns, hit[2], kRuns, hit[3], kRuns, hit[0], kRuns);
         if(unsat[0] + unsat[1] + unsat[2] + unsat[3])
-            printf("   (unrepairable: drive %d fb %d delay %d lfo %d)",
+            printf("   (unrepairable: drive %d fb %d delay %d mod %d)",
                    unsat[1], unsat[2], unsat[3], unsat[0]);
         printf("\n");
         for(int p = 0; p < 4; p++)
@@ -787,6 +792,207 @@ static void TestSounds()
 
 // The whole knob space, every break type, four voices cross-patched: the
 // instrument must stay finite and bounded everywhere in it.
+// All three modulation modes share rule 5's peak test, so all three have to
+// stay inside the same bounds
+// There is one modulator now, and it still has to respect rule 5's bound
+static void TestModulator()
+{
+    printf("the follower stays bounded\n");
+    float worst = 0.0f, swing = 0.0f;
+    bool  ok = true;
+    for(uint32_t seed = 1; seed <= 30; seed++)
+    {
+        Init(seed);
+        voices::Init(kSr, kBlock);
+        K().mod    = 1.0f;   // deepest modulation
+        K().fb     = 1.0f;
+        K().drive  = 1.0f;
+        K().safe   = 0.0f;   // and no rule to rein it in
+        K().unrest = 0.0f;
+        RebuildRules();
+        float     now = 1.0f;
+        Start(now, kVoices);
+        const Run r = Drive(now, 2.5f);
+        if(!r.finite)
+            ok = false;
+        if(r.peak > worst)
+            worst = r.peak;
+        float lo = 9.0f, hi = -9.0f;
+        for(int b = 0; b < 400; b++)
+        {
+            Drive(now, 0.01f);
+            const float x = voices::Mod(0);
+            if(x < lo) lo = x;
+            if(x > hi) hi = x;
+        }
+        if(hi - lo > swing)
+            swing = hi - lo;
+    }
+    printf("  worst peak %.2f, widest swing %.2f\n", worst, swing);
+    Check("finite", ok);
+    Check("bounded", worst < 2.0f);
+    Check("the follower actually moves", swing > 0.3f);
+}
+
+// Rule 6 only exists while the cables are switched to a mode
+static void TestCableModes()
+{
+    printf("cables off means none, cables on means nobody left out\n");
+    voices::SetCableMode(voices::kCableOff);
+    int patched = 0;
+    for(uint32_t seed = 1; seed <= 40; seed++)
+    {
+        Init(seed);
+        voices::Init(kSr, kBlock);
+        K().unrest = 0.0f;
+        K().safe   = 0.7f;
+        RebuildRules();
+        float now = 1.0f;
+        Start(now, kVoices);
+        Heal(now);
+        for(int b2 = 0; b2 < 400; b2++) { now += 0.05f; Tick(now); }
+        for(int v = 0; v < kVoices; v++)
+            if(ShownPatch(v))
+                patched++;
+    }
+    Check("no cable exists while they are off", patched == 0);
+
+    for(int m = (int)voices::kCableFeed; m < (int)voices::kCableCount; m++)
+    {
+        voices::SetCableMode(m);
+        int isolated = 0, runs = 0;
+        float worst = 0.0f;
+        bool  finite = true;
+        for(uint32_t seed = 1; seed <= 40; seed++)
+        {
+            Init(seed);
+            voices::Init(kSr, kBlock);
+            voices::SetCableMode(m);
+            K().unrest = 0.0f;
+            K().fb     = 1.0f;
+            K().drive  = 1.0f;
+            K().safe   = 0.7f;
+            RebuildRules();
+            float now = 1.0f;
+            Start(now, kVoices);
+            Heal(now);
+            for(int b2 = 0; b2 < 400; b2++) { now += 0.05f; Tick(now); }
+            // Every sounding voice must send or receive
+            for(int v = 0; v < kVoices; v++)
+            {
+                bool touched = ShownPatch(v) != 0;
+                for(int j = 0; j < kVoices && !touched; j++)
+                    if(j != v && ShownPatch(j)
+                       && OptTarget(ShownPatch(j)) == v)
+                        touched = true;
+                if(!touched)
+                    isolated++;
+                runs++;
+            }
+            const Run r = Drive(now, 1.5f);
+            if(!r.finite)
+                finite = false;
+            if(r.peak > worst)
+                worst = r.peak;
+        }
+        printf("  %-4s isolated %d/%d   worst peak %.2f\n",
+               voices::CableName(m), isolated, runs, worst);
+        Check("nobody is isolated once settled", isolated == 0);
+        Check("finite", finite);
+        Check("bounded", worst < 2.0f);
+    }
+    voices::SetCableMode(voices::kCableOff);
+}
+
+// The cable rules that differ by mode: feed stays acyclic and gain-budgeted,
+// mod is allowed to couple voices into rings
+static void TestCableRules()
+{
+    printf("feed and mod do not get the same cable rules\n");
+    for(int m = (int)voices::kCableFeed; m < (int)voices::kCableCount; m++)
+    {
+        int cycles = 0, overfed = 0, overfanned = 0, split = 0, runs = 0;
+        for(uint32_t seed = 1; seed <= 60; seed++)
+        {
+            Init(seed);
+            voices::Init(kSr, kBlock);
+            voices::SetCableMode(m);
+            K().unrest = 0.0f;
+            K().safe   = 0.9f;   // every cable limit binding, connected on
+            RebuildRules();
+            float now = 1.0f;
+            Start(now, kVoices);
+            Heal(now);
+            for(int b2 = 0; b2 < 400; b2++) { now += 0.05f; Tick(now); }
+
+            float in_amt[kVoices] = {};
+            int   in_deg[kVoices] = {};
+            for(int v = 0; v < kVoices; v++)
+                if(ShownPatch(v))
+                {
+                    const int t = OptTarget(ShownPatch(v));
+                    in_amt[t] += AMT[OptAmt(ShownPatch(v))];
+                    in_deg[t]++;
+                }
+            for(int v = 0; v < kVoices; v++)
+            {
+                if(in_deg[v] > Lim().fan_in)
+                    overfanned++;
+                if(FL[TileF(ShownTile(v))] * FbMul() + in_amt[v]
+                   > Lim().Iflood + 1e-3f)
+                    overfed++;
+                // Walk the chain from v and see whether it returns
+                int cur = v;
+                for(int step = 0; step < kVoices; step++)
+                {
+                    if(!ShownPatch(cur))
+                        break;
+                    cur = OptTarget(ShownPatch(cur));
+                    if(cur == v)
+                    {
+                        cycles++;
+                        break;
+                    }
+                }
+            }
+            // One structure, not two: reachable either way round
+            bool seen[kVoices] = {};
+            int  stack[kVoices], ns = 0, reached = 1;
+            stack[ns++] = 0;
+            seen[0]     = true;
+            while(ns)
+            {
+                const int cur = stack[--ns];
+                for(int w = 0; w < kVoices; w++)
+                {
+                    if(seen[w]) continue;
+                    const bool linked
+                        = (ShownPatch(cur) && OptTarget(ShownPatch(cur)) == w)
+                          || (ShownPatch(w) && OptTarget(ShownPatch(w)) == cur);
+                    if(linked)
+                    { seen[w] = true; stack[ns++] = w; reached++; }
+                }
+            }
+            if(reached < kVoices)
+                split++;
+            runs++;
+        }
+        printf("  %-4s cycles %d  over budget %d  over fan-in %d  split %d"
+               "  (of %d runs)\n",
+               voices::CableName(m), cycles, overfed, overfanned, split, runs);
+        if(m == (int)voices::kCableFeed)
+        {
+            Check("feed stays acyclic", cycles == 0);
+            Check("feed respects the flood budget", overfed == 0);
+        }
+        Check("the fan-in cap holds", overfanned == 0);
+        Check("one structure, not two", split == 0);
+    }
+    voices::SetCableMode(voices::kCableOff);
+    K().safe = 0.7f;
+    RebuildRules();
+}
+
 static void TestNeverBlowsUp()
 {
     printf("never blows up, anywhere in the knob space\n");
@@ -802,7 +1008,7 @@ static void TestNeverBlowsUp()
         K().fb     = corner ? 1.0f : (float)(seed % 7) / 6.0f;
         K().drive  = corner ? 1.0f : (float)(seed % 5) / 4.0f;
         K().filter = corner ? 1.0f : (float)(seed % 9) / 8.0f;
-        K().lfo    = corner ? 1.0f : (float)(seed % 4) / 3.0f;
+        K().mod    = corner ? 1.0f : (float)(seed % 4) / 3.0f;
         K().safe   = corner ? 0.0f : (float)(seed % 13) / 12.0f;
         K().unrest = 0.0f;
         RebuildRules();
@@ -880,6 +1086,7 @@ static void TestCableCarries()
     printf("a cable carries audio into the target's line\n");
     Init(3);
     voices::Init(kSr, kBlock);
+    voices::SetCableMode(voices::kCableFeed);
     K().safe = 0.0f;   // no rule may undo the cable
     K().unrest = 0.0f;
     RebuildRules();
@@ -894,6 +1101,7 @@ static void TestCableCarries()
            after.rms);
     Check("finite with cables live", after.finite);
     Check("cross-patching adds energy", after.rms > before.rms);
+    voices::SetCableMode(voices::kCableOff);
 }
 
 // Something to listen to beside the web prototype
@@ -917,6 +1125,9 @@ int SelfTest()
     TestInputDetector();
     TestSilence();
     TestSounds();
+    TestModulator();
+    TestCableModes();
+    TestCableRules();
     TestNeverBlowsUp();
     TestSwellRings();
     TestCableCarries();

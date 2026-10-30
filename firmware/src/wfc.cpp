@@ -39,6 +39,9 @@ inline float Smooth(float a, float b, float x)
 Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.5f};
 // Tune's centre is concert pitch, so 0.5 is where it boots
 bool   frozen = false;
+int    cable_mode = 0;   // 0 none, 1 feed, 2 mod
+const int* rp_tiles = nullptr;   // the tiles the patch search weighs
+float      rm_in[kVoices] = {};  // cable depth arriving, per voice
 Limits limits = {};
 
 // The rule tables, rebuilt on every knob move: which tiles may sit beside
@@ -49,10 +52,10 @@ uint8_t self_ok[kTiles];
 // Logical: what WFC has decided. Shown: what the audio has reached.
 int16_t tile[kVoices], shown_tile[kVoices];
 int8_t  patch[kVoices], shown_patch[kVoices];
-int8_t  lfo_opt[kVoices], shown_lfo[kVoices];
+int8_t  mod_opt[kVoices], shown_mod[kVoices];
 uint8_t skew[kVoices], shown_skew[kVoices];
 // Per field, so an older event in the wave never overwrites a newer one
-int32_t seq_tile[kVoices], seq_patch[kVoices], seq_lfo[kVoices],
+int32_t seq_tile[kVoices], seq_patch[kVoices], seq_mod[kVoices],
     seq_skew[kVoices];
 int32_t seq = 0;
 
@@ -63,7 +66,7 @@ int   flash[kVoices];
 // A change the wave carries. -1 means the field is not part of it.
 struct Change
 {
-    int tile, patch, lfo, skew;
+    int tile, patch, mod, skew;
 };
 inline Change NoChange() { return Change{-1, -1, -1, -1}; }
 
@@ -126,15 +129,64 @@ bool OkRatio(float a, float b)
     return false;
 }
 
-float LfoPeak(int t, int o)
+// `in_amt` is the cable depth arriving at this voice, which only counts in
+// cross-modulation: there it is spent on the same tap and the same feedback
+// the voice modulates itself with, so it belongs in the same peak.
+float ModPeak(int t, int o, float in_amt)
 {
-    const float dp = DP[LfoDepth(o)] * LfoMul();
+    const float dp = DP[ModDepthOf(o)] * ModMul()
+                     + (cable_mode == 2 ? 0.3f * in_amt : 0.0f);
     return (FL[TileF(t)] * FbMul() + 0.2f * dp) * (1.0f + 0.35f * dp);
 }
 
-// Rule 4: following cables between sounding voices must not return to the
-// start, and no voice may patch into itself
-bool PatchesOK(const int8_t* pa, const int* act, int n)
+// How much cable is arriving at each sounding voice, as a sum of amounts.
+// Feed spends it as gain, mod spends it as modulation depth, so the two modes
+// budget the same number against different rules.
+void InAmounts(const int8_t* pa, const int* act, int n, float* in_amt,
+               int* in_deg)
+{
+    for(int i = 0; i < n; i++)
+    {
+        in_amt[act[i]] = 0.0f;
+        in_deg[act[i]] = 0;
+    }
+    for(int i = 0; i < n; i++)
+    {
+        const int o = pa[act[i]];
+        if(!o)
+            continue;
+        const int t = OptTarget(o);
+        if(!InList(act, n, t))
+            continue;
+        in_amt[t] += AMT[OptAmt(o)];
+        in_deg[t]++;
+    }
+}
+
+// What the mod layer must weigh: the cable depth arriving at each voice,
+// taken from the patches the layer before it settled on.
+void SetModIn(const int8_t* pa, const int* act, int n)
+{
+    int in_deg[kVoices];
+    for(int i = 0; i < kVoices; i++)
+        rm_in[i] = 0.0f;
+    InAmounts(pa, act, n, rm_in, in_deg);
+}
+
+// The cable rules. Rule 4 is the old one -- no self patch ever, and no cycle
+// when strict -- but the cycle half is FEED ONLY: audio going round a ring
+// multiplies gain on top of each voice's own feedback, while modulation going
+// round a ring is a pair of coupled oscillators and is the whole attraction.
+//
+// Rule 6 is the cable cover: nobody sounding is left out of the patching, and
+// at high strictness they must all be in ONE structure rather than two.
+//
+// Rule 7 is the per-voice budget, and it is where the modes diverge. In feed
+// it is a gain budget -- a voice may not be both self-ringing and heavily fed
+// (break type `flood`). In mod it is spent inside ModPeak instead, so a voice
+// modulated hard from outside counts against the same peak limit as one
+// modulating itself (break type `wobble`).
+bool PatchesOK(const int8_t* pa, const int* act, int n, const int* tiles)
 {
     for(int i = 0; i < n; i++)
     {
@@ -142,7 +194,73 @@ bool PatchesOK(const int8_t* pa, const int* act, int n)
         if(o && OptTarget(o) == act[i])
             return false;
     }
-    if(!limits.cycle_on)
+    if(!cable_mode)
+    {
+        // Switched off, the only cable that may exist is no cable
+        for(int i = 0; i < n; i++)
+            if(pa[act[i]])
+                return false;
+        return true;
+    }
+
+    float in_amt[kVoices];
+    int   in_deg[kVoices];
+    InAmounts(pa, act, n, in_amt, in_deg);
+
+    // Rule 6: an edge cover. A single voice cannot patch to anything, so
+    // there is nothing to ask of it.
+    if(n >= 2)
+        for(int i = 0; i < n; i++)
+            if(!pa[act[i]] && !in_deg[act[i]])
+                return false;
+
+    for(int i = 0; i < n; i++)
+    {
+        // Rule 7a: fan-in. Feed is capped harder, because what arrives there
+        // is gain; mod only gets busier.
+        if(in_deg[act[i]] > limits.fan_in)
+            return false;
+        // Rule 7b: the flood budget, feed only
+        if(cable_mode == 1 && tiles
+           && FL[TileF(tiles[act[i]])] * FbMul() + in_amt[act[i]]
+                  > limits.Iflood)
+            return false;
+    }
+
+    // Rule 6b: one structure, not two disjoint pairs. Edges count either way
+    // round for this, so a chain satisfies it without a cycle.
+    if(limits.connected_on && n >= 2)
+    {
+        bool seen[kVoices] = {};
+        int  stack[kVoices], ns = 0;
+        stack[ns++]     = act[0];
+        seen[act[0]]    = true;
+        int reached     = 1;
+        while(ns)
+        {
+            const int cur = stack[--ns];
+            for(int i = 0; i < n; i++)
+            {
+                const int w = act[i];
+                if(seen[w])
+                    continue;
+                const bool linked
+                    = (pa[cur] && OptTarget(pa[cur]) == w)
+                      || (pa[w] && OptTarget(pa[w]) == cur);
+                if(linked)
+                {
+                    seen[w]     = true;
+                    stack[ns++] = w;
+                    reached++;
+                }
+            }
+        }
+        if(reached < n)
+            return false;
+    }
+
+    // Rule 4's cycle half: feed only
+    if(!limits.cycle_on || cable_mode != 1)
         return true;
     for(int i = 0; i < n; i++)
     {
@@ -334,7 +452,7 @@ void RpRec(int i)
 {
     if(i == rp_n_others)
     {
-        if(!PatchesOK(rp_trial, rp_act, rp_n))
+        if(!PatchesOK(rp_trial, rp_act, rp_n, rp_tiles))
             return;
         float c = Rand() * kWild * 2;
         for(int j = 0; j < rp_n_others; j++)
@@ -360,8 +478,9 @@ void RpRec(int i)
 }
 
 bool RepairPatches(const int* act, int n, int fixed_v, int fixed_opt,
-                   int8_t* out)
+                   const int* tiles, int8_t* out)
 {
+    rp_tiles    = tiles;
     rp_n_others = 0;
     for(int i = 0; i < n; i++)
         if(act[i] != fixed_v)
@@ -379,62 +498,62 @@ bool RepairPatches(const int* act, int n, int fixed_v, int fixed_opt,
     return rp_found;
 }
 
-// The LFO layer, judged against the tiles the line layer just chose. Rule 5
+// The mod layer, judged against the tiles the line layer just chose. Rule 5
 // prunes before the search, so 20^4 is never actually walked.
-bool       rl_found;
-float      rl_best_cost;
-int8_t     rl_best[kVoices], rl_trial[kVoices];
-int        rl_others[kVoices], rl_n_others;
-const int* rl_tiles;
+bool       rm_found;
+float      rm_best_cost;
+int8_t     rm_best[kVoices], rm_trial[kVoices];
+int        rm_others[kVoices], rm_n_others;
+const int* rm_tiles;
 
-void RlRec(int i)
+void RmRec(int i)
 {
-    if(i == rl_n_others)
+    if(i == rm_n_others)
     {
         float c = Rand() * kWild * 2;
-        for(int j = 0; j < rl_n_others; j++)
-            if(rl_trial[rl_others[j]] != lfo_opt[rl_others[j]])
+        for(int j = 0; j < rm_n_others; j++)
+            if(rm_trial[rm_others[j]] != mod_opt[rm_others[j]])
                 c += 10.0f;
-        if(c < rl_best_cost)
+        if(c < rm_best_cost)
         {
-            rl_best_cost = c;
-            memcpy(rl_best, rl_trial, sizeof(rl_trial));
-            rl_found = true;
+            rm_best_cost = c;
+            memcpy(rm_best, rm_trial, sizeof(rm_trial));
+            rm_found = true;
         }
         return;
     }
-    const int n = rl_others[i];
-    for(int o = 0; o < kLfoOpts; o++)
+    const int n = rm_others[i];
+    for(int o = 0; o < kModOpts; o++)
     {
-        if(LfoPeak(rl_tiles[n], o) > limits.Lpeak)
+        if(ModPeak(rm_tiles[n], o, rm_in[n]) > limits.Lpeak)
             continue;
-        rl_trial[n] = (int8_t)o;
-        RlRec(i + 1);
+        rm_trial[n] = (int8_t)o;
+        RmRec(i + 1);
     }
-    rl_trial[n] = lfo_opt[n];
+    rm_trial[n] = mod_opt[n];
 }
 
-bool RepairLfo(const int* act, int n, int fixed_v, int fixed_opt,
+bool RepairMod(const int* act, int n, int fixed_v, int fixed_opt,
                const int* tl, int8_t* out)
 {
-    rl_n_others = 0;
+    rm_n_others = 0;
     for(int i = 0; i < n; i++)
         if(act[i] != fixed_v)
-            rl_others[rl_n_others++] = act[i];
-    memcpy(rl_trial, lfo_opt, sizeof(rl_trial));
+            rm_others[rm_n_others++] = act[i];
+    memcpy(rm_trial, mod_opt, sizeof(rm_trial));
     if(fixed_v >= 0)
     {
-        if(LfoPeak(tl[fixed_v], fixed_opt) > limits.Lpeak)
+        if(ModPeak(tl[fixed_v], fixed_opt, rm_in[fixed_v]) > limits.Lpeak)
             return false;
-        rl_trial[fixed_v] = (int8_t)fixed_opt;
+        rm_trial[fixed_v] = (int8_t)fixed_opt;
     }
-    rl_tiles     = tl;
-    rl_found     = false;
-    rl_best_cost = 1e30f;
-    RlRec(0);
-    if(rl_found)
-        memcpy(out, rl_best, sizeof(rl_best));
-    return rl_found;
+    rm_tiles     = tl;
+    rm_found     = false;
+    rm_best_cost = 1e30f;
+    RmRec(0);
+    if(rm_found)
+        memcpy(out, rm_best, sizeof(rm_best));
+    return rm_found;
 }
 
 // ---------------------------------------------------------------- the wave
@@ -471,10 +590,10 @@ int ApplyWave(const Change* ch, const int* order, int n, int kind,
             e.skew  = ch[v].skew;
             any     = true;
         }
-        if(ch[v].lfo >= 0 && ch[v].lfo != lfo_opt[v])
+        if(ch[v].mod >= 0 && ch[v].mod != mod_opt[v])
         {
-            lfo_opt[v] = (int8_t)ch[v].lfo;
-            e.lfo      = ch[v].lfo;
+            mod_opt[v] = (int8_t)ch[v].mod;
+            e.mod      = ch[v].mod;
             any        = true;
         }
         if(!any)
@@ -502,7 +621,12 @@ int RandomTile()
 
 int RandomPatchOpt(int v, const int* act, int n)
 {
-    if(Rand() < 0.55f)
+    // With cables off the only legal option is none; with them on, asking for
+    // one most of the time is what lets rule 6 be satisfied without the search
+    // having to climb out of a hole
+    if(!cable_mode)
+        return 0;
+    if(Rand() < 0.2f)
         return 0;
     int others[kVoices], no = 0, live[kVoices], nl = 0;
     for(int o = 0; o < kVoices; o++)
@@ -517,9 +641,15 @@ int RandomPatchOpt(int v, const int* act, int n)
     return 1 + pick * 3 + RandInt(3);
 }
 
-int RandomLfoOpt()
+int RandomModOpt()
 {
-    const int depth = Rand() < 0.25f ? 0 : 1 + RandInt(3);
+    // The knob asks for depth; rule 5 decides how much of it is allowed. The
+    // request used to ignore the knob entirely, so turning the mod up only
+    // made the deep options illegal and the solver answered with depth 0 --
+    // the knob did the opposite of what it says.
+    const float want  = knob.mod * 3.0f;
+    int         depth = (int)(want * (0.4f + 0.8f * Rand()) + 0.5f);
+    depth             = depth < 0 ? 0 : (depth > 3 ? 3 : depth);
     return RandInt(5) * 4 + depth;
 }
 
@@ -529,6 +659,8 @@ int RandomLfoOpt()
 
 Knobs&        K() { return knob; }
 void          SetFrozen(bool on) { frozen = on; }
+void          SetCableMode(int m) { cable_mode = m; }
+int           CableMode() { return cable_mode; }
 bool          Frozen() { return frozen; }
 const Limits& Lim() { return limits; }
 
@@ -539,10 +671,10 @@ float HopSeconds() { return Clamp(DelayBase() * 0.8f, 0.03f, 1.0f); }
 // voices were cutting off before their own echoes.
 float ReleaseT() { return Clamp(DelayBase() * 6.5f, 0.45f, 6.5f); }
 float AttackT() { return Clamp(DelayBase() * 3.0f, 0.2f, 3.0f) * 0.35f; }
-float LfoRate0() { return Clamp(1.0f / (DelayBase() * 8.0f), 0.08f, 2.5f); }
+float ModSpeed0() { return Clamp(1.0f / (DelayBase() * 8.0f), 0.08f, 2.5f); }
 float FbMul() { return Lerp(0.5f, 1.5f, knob.fb); }
 float DrvMul() { return Lerp(0.4f, 1.6f, knob.drive); }
-float LfoMul() { return Lerp(0.0f, 1.5f, knob.lfo); }
+float ModMul() { return Lerp(0.0f, 1.5f, knob.mod); }
 float LoopCut() { return 300.0f * powf(24.0f, knob.filter); }
 float VoiceCutMul() { return Lerp(1.5f, 14.0f, knob.filter); }
 // Unrest used to ride on strictness, which made strict-but-restless and
@@ -554,7 +686,7 @@ float UnrestRate() { return Lerp(0.0f, 0.25f, knob.unrest); }
 const char* BreakName(BreakType t)
 {
     static const char* n[kBreakTypes]
-        = {"echo", "swell", "fuzz", "wobble", "cable"};
+        = {"echo", "swell", "fuzz", "wobble", "flood", "cable"};
     return (int)t < kBreakTypes ? n[t] : "?";
 }
 
@@ -568,6 +700,11 @@ void RebuildRules()
     limits.cycle_on = s > 0.35f;
     limits.Lpeak    = s > 0.6f ? 0.98f : (s > 0.3f ? 1.2f : 9.0f);
     limits.gap      = Lerp(0.004f, 0.02f, s);
+    // The cable rules. Feed is held tighter than mod throughout: what arrives
+    // down a feed cable is gain, what arrives down a mod cable is movement.
+    limits.Iflood       = Lerp(3.2f, 1.4f, s);
+    limits.fan_in       = cable_mode == 1 ? (s > 0.6f ? 1 : 2) : 3;
+    limits.connected_on = s > 0.7f;
 
     const float fm = FbMul(), dm = DrvMul(), base = DelayBase();
     for(int t = 0; t < kTiles; t++)
@@ -604,9 +741,9 @@ void Init(uint32_t seed)
     {
         tile[v] = shown_tile[v] = kDefaultTile;
         patch[v] = shown_patch[v] = 0;
-        lfo_opt[v] = shown_lfo[v] = 0;
+        mod_opt[v] = shown_mod[v] = 0;
         skew[v] = shown_skew[v] = 0;
-        seq_tile[v] = seq_patch[v] = seq_lfo[v] = seq_skew[v] = 0;
+        seq_tile[v] = seq_patch[v] = seq_mod[v] = seq_skew[v] = 0;
         sounding[v]                                           = false;
         started_at[v]                                         = 0;
         flash[v]                                              = 0;
@@ -628,11 +765,11 @@ float StartedAt(int v) { return started_at[v]; }
 
 int Tile(int v) { return tile[v]; }
 int Patch(int v) { return patch[v]; }
-int Lfo(int v) { return lfo_opt[v]; }
+int Mod(int v) { return mod_opt[v]; }
 int Skew(int v) { return skew[v]; }
 int ShownTile(int v) { return shown_tile[v]; }
 int ShownPatch(int v) { return shown_patch[v]; }
-int ShownLfo(int v) { return shown_lfo[v]; }
+int ShownMod(int v) { return shown_mod[v]; }
 int ShownSkew(int v) { return shown_skew[v]; }
 
 int TakeFlash(int v)
@@ -672,14 +809,9 @@ void Pass(int v, float now)
         skipped = Repair(act, n, order, v, RandomTile(), line);
     const bool have_line = skipped >= 0;
 
-    int8_t pat[kVoices];
-    bool   have_pat = false;
-    for(int k = 0; k < 10 && !have_pat; k++)
-        have_pat = RepairPatches(act, n, v, RandomPatchOpt(v, act, n), pat);
-    if(!have_pat)
-        have_pat = RepairPatches(act, n, v, 0, pat);
-
-    // The LFO is judged against the tiles the line layer just chose
+    // Both the patches and the mod are judged against the tiles the line
+    // layer just chose: the flood budget weighs feedback against what is fed
+    // in, so it cannot be decided before the feedback is
     int ft[kVoices];
     for(int i = 0; i < kVoices; i++)
         ft[i] = tile[i];
@@ -688,12 +820,22 @@ void Pass(int v, float now)
             if(line[order[i]] >= 0)   // -1 means that voice keeps its tile
                 ft[order[i]] = line[order[i]];
 
-    int8_t lf[kVoices];
-    bool   have_lfo = false;
-    for(int k = 0; k < 12 && !have_lfo; k++)
-        have_lfo = RepairLfo(act, n, v, RandomLfoOpt(), ft, lf);
-    if(!have_lfo)
-        have_lfo = RepairLfo(act, n, v, 0, ft, lf);
+    int8_t pat[kVoices];
+    bool   have_pat = false;
+    for(int k = 0; k < 10 && !have_pat; k++)
+        have_pat
+            = RepairPatches(act, n, v, RandomPatchOpt(v, act, n), ft, pat);
+    if(!have_pat)
+        have_pat = RepairPatches(act, n, v, 0, ft, pat);
+
+    SetModIn(have_pat ? pat : patch, act, n);
+
+    int8_t md[kVoices];
+    bool   have_mod = false;
+    for(int k = 0; k < 12 && !have_mod; k++)
+        have_mod = RepairMod(act, n, v, RandomModOpt(), ft, md);
+    if(!have_mod)
+        have_mod = RepairMod(act, n, v, 0, ft, md);
 
     Change ch[kVoices];
     for(int i = 0; i < kVoices; i++)
@@ -705,8 +847,8 @@ void Pass(int v, float now)
             ch[m].tile = line[m];
         if(have_pat)
             ch[m].patch = pat[m];
-        if(have_lfo)
-            ch[m].lfo = lf[m];
+        if(have_mod)
+            ch[m].mod = md[m];
     }
     ch[v].skew = 0;
     ApplyWave(ch, order, no, 1, 0.0f, now);
@@ -729,9 +871,8 @@ void Heal(float now)
     // Nothing is pinned here, so there is no alternative roll to try: a
     // partial settle is taken as it comes.
     int        line[kVoices];
-    int8_t     pat[kVoices], lf[kVoices];
+    int8_t     pat[kVoices], md[kVoices];
     const bool have_line = Repair(act, n, order, -1, -1, line) >= 0;
-    const bool have_pat  = RepairPatches(act, n, -1, 0, pat);
 
     int ft[kVoices];
     for(int i = 0; i < kVoices; i++)
@@ -740,7 +881,10 @@ void Heal(float now)
         for(int i = 0; i < n; i++)
             if(line[order[i]] >= 0)   // -1 means that voice keeps its tile
                 ft[order[i]] = line[order[i]];
-    const bool have_lfo = RepairLfo(act, n, -1, 0, ft, lf);
+
+    const bool have_pat = RepairPatches(act, n, -1, 0, ft, pat);
+    SetModIn(have_pat ? pat : patch, act, n);
+    const bool have_mod = RepairMod(act, n, -1, 0, ft, md);
 
     Change ch[kVoices];
     for(int i = 0; i < kVoices; i++)
@@ -754,7 +898,7 @@ void Heal(float now)
         // this repair exists to avoid.
         ch[m].tile  = have_line ? line[m] : -1;
         ch[m].patch = have_pat ? pat[m] : 0;
-        ch[m].lfo   = have_lfo ? lf[m] : 0;
+        ch[m].mod   = have_mod ? md[m] : 0;
     }
     ApplyWave(ch, order, n, 1, 0.0f, now);
 }
@@ -765,10 +909,23 @@ void BreakRule(int type, float offset, float now)
     const int n = Active(act);
     if(!n)
         return;
-    // A cable break needs two voices to cross
-    const int n_types = n >= 2 ? kBreakTypes : kBreakTypes - 1;
-    if(type < 0 || type >= n_types)
-        type = RandInt(n_types);
+    // Not every break is available: the cable ones need two voices to cross
+    // and a mode to cross in, and flooding is a feed-only idea.
+    int avail[kBreakTypes], na = 0;
+    for(int t = 0; t < kBreakTypes; t++)
+    {
+        if((t == kCable || t == kFlood) && (n < 2 || !cable_mode))
+            continue;
+        if(t == kFlood && cable_mode != 1)
+            continue;
+        avail[na++] = t;
+    }
+    bool ok = false;
+    for(int i = 0; i < na; i++)
+        if(avail[i] == type)
+            ok = true;
+    if(!ok)
+        type = na ? avail[RandInt(na)] : kSwell;
 
     int order[kVoices];
     memcpy(order, act, sizeof(int) * n);
@@ -809,15 +966,19 @@ void BreakRule(int type, float offset, float now)
                     = MkTile(TileD(tb), TileF(tb) < 2 ? TileF(tb) : 2, 3);
             break;
         case kWobble:   // full depth, same rate, on an already hot loop
-            ch[a].lfo = 7;
+            ch[a].mod = 7;
             ch[a].tile
                 = MkTile(TileD(ta), TileF(ta) > 3 ? TileF(ta) : 3, TileR(ta));
             if(b >= 0)
             {
-                ch[b].lfo = 7;
+                ch[b].mod = 7;
                 ch[b].tile = MkTile(TileD(tb), TileF(tb) > 3 ? TileF(tb) : 3,
                                     TileR(tb));
             }
+            break;
+        case kFlood:   // fed hard while already ringing, feed only
+            ch[b].patch = 1 + a * 3 + 2;
+            ch[a].tile  = MkTile(TileD(ta), 4, TileR(ta) < 1 ? TileR(ta) : 1);
             break;
         default:   // two voices patched into each other, hardest
             ch[a].patch = 1 + b * 3 + 2;
@@ -862,10 +1023,10 @@ void Tick(float now)
             seq_skew[e.v]   = e.seq;
             shown_skew[e.v] = (uint8_t)e.ch.skew;
         }
-        if(e.ch.lfo >= 0 && e.seq >= seq_lfo[e.v])
+        if(e.ch.mod >= 0 && e.seq >= seq_mod[e.v])
         {
-            seq_lfo[e.v]   = e.seq;
-            shown_lfo[e.v] = (int8_t)e.ch.lfo;
+            seq_mod[e.v]   = e.seq;
+            shown_mod[e.v] = (int8_t)e.ch.mod;
         }
         if(e.kind > flash[e.v])
             flash[e.v] = e.kind;
@@ -911,6 +1072,9 @@ int Diagnose(Violation* out, int max)
     const int   n   = Active(act);
     int         cnt = 0;
     const float fm = FbMul(), dm = DrvMul(), base = DelayBase();
+    float       in_amt[kVoices] = {};
+    int         in_deg[kVoices] = {};
+    InAmounts(shown_patch, act, n, in_amt, in_deg);
 
     for(int i = 0; i < n && cnt < max; i++)
     {
@@ -919,9 +1083,18 @@ int Diagnose(Violation* out, int max)
             out[cnt++] = Violation{kSwell, {a, -1}};
         if(limits.ratio_on && shown_skew[a] && cnt < max)
             out[cnt++] = Violation{kEcho, {a, -1}};
-        if(DP[LfoDepth(shown_lfo[a])] > 0
-           && LfoPeak(t, shown_lfo[a]) > limits.Lpeak && cnt < max)
+        if(cable_mode
+           && (DP[ModDepthOf(shown_mod[a])] > 0 || in_amt[a] > 0.0f)
+           && ModPeak(t, shown_mod[a], in_amt[a]) > limits.Lpeak && cnt < max)
             out[cnt++] = Violation{kWobble, {a, -1}};
+        else if(!cable_mode && DP[ModDepthOf(shown_mod[a])] > 0
+                && ModPeak(t, shown_mod[a], 0.0f) > limits.Lpeak && cnt < max)
+            out[cnt++] = Violation{kWobble, {a, -1}};
+        // Rule 7: fed and ringing at once, which only feed can be
+        if(cable_mode == 1 && cnt < max
+           && (FL[TileF(t)] * fm + in_amt[a] > limits.Iflood
+               || in_deg[a] > limits.fan_in))
+            out[cnt++] = Violation{kFlood, {a, -1}};
     }
     for(int i = 0; i < n; i++)
         for(int j = i + 1; j < n && cnt < max; j++)

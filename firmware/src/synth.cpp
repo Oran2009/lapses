@@ -228,7 +228,7 @@ const char* KnobName(int i)
 {
     static const char* n[kKnobs]
         = {"Delay",  "Feedback", "Distortion", "Filter",
-           "LFO",    "Control",  "Unrest",     "Tune"};
+           "Mod",    "Control",  "Unrest",     "Tune"};
     return i >= 0 && i < kKnobs ? n[i] : "?";
 }
 
@@ -416,6 +416,19 @@ void Process(float* l, float* r, int n, const float* in)
                      * gain_lin);
     }
 }
+
+void SetCableMode(int m)
+{
+    if(m == voices::CableMode_())
+        return;
+    voices::SetCableMode(m);
+    // Settle what is already sounding into the new mode: before this the
+    // switch only took effect on the next press, so you had to release
+    // everything to hear it
+    wfc::Heal(now_s);
+}
+int  CableMode() { return voices::CableMode_(); }
+const char* CableName(int m) { return voices::CableName(m); }
 
 void Break() { wfc::BreakRule(-1, 0.0f, now_s); }
 void Settle() { wfc::Heal(now_s); }
