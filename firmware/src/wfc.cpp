@@ -36,7 +36,9 @@ inline float Smooth(float a, float b, float x)
     return k * k * (3.0f - 2.0f * k);
 }
 
-Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f};
+Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.5f};
+// Tune's centre is concert pitch, so 0.5 is where it boots
+bool   frozen = false;
 Limits limits = {};
 
 // The rule tables, rebuilt on every knob move: which tiles may sit beside
@@ -526,6 +528,8 @@ int RandomLfoOpt()
 // ---------------------------------------------------------------- the knobs
 
 Knobs&        K() { return knob; }
+void          SetFrozen(bool on) { frozen = on; }
+bool          Frozen() { return frozen; }
 const Limits& Lim() { return limits; }
 
 float DelayBase() { return 0.03f * powf(30.0f, knob.delay); }
@@ -541,11 +545,11 @@ float DrvMul() { return Lerp(0.4f, 1.6f, knob.drive); }
 float LfoMul() { return Lerp(0.0f, 1.5f, knob.lfo); }
 float LoopCut() { return 300.0f * powf(24.0f, knob.filter); }
 float VoiceCutMul() { return Lerp(1.5f, 14.0f, knob.filter); }
-float LapseChance()
-{
-    return Lerp(0.5f, 0.0f, Smooth(0.15f, 0.9f, knob.safe));
-}
-float UnrestRate() { return Lerp(0.25f, 0.0f, Smooth(0.2f, 0.95f, knob.safe)); }
+// Unrest used to ride on strictness, which made strict-but-restless and
+// loose-but-still unreachable. Its own control, so Control says how firmly
+// the rules hold and Unrest says how often the instrument moves by itself.
+float LapseChance() { return Lerp(0.0f, 0.5f, knob.unrest); }
+float UnrestRate() { return Lerp(0.0f, 0.25f, knob.unrest); }
 
 const char* BreakName(BreakType t)
 {
@@ -877,6 +881,8 @@ void Tick(float now)
         if(n)
             Heal(now);
     }
+    if(frozen)
+        return;
     if(heal_at && now > heal_at)
         Heal(now);
 

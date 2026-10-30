@@ -145,7 +145,7 @@ struct Voice
     float   hz;
     float   amp;
 
-    Svf vlp, llp;
+    Svf vlp, llp, llp2;   // llp2 is the side tap's, so both channels match
 
     // The delay line, written and read once a sample
     float* line;
@@ -156,7 +156,7 @@ struct Voice
     // Lifted for a few seconds after a press, so a new pad speaks before it
     // dissolves into the wash
     float fresh;
-    float loop_hp;   // the loop highpass's state
+    float loop_hp, loop_hp2;   // the loop highpass's state, one per tap
     float vcut, vcut_t;
     float dly, dly_t;        // seconds
     float fb, fb_t;
@@ -179,6 +179,8 @@ struct Voice
     float post_prev;
 
     float pan_l, pan_r;
+    float pan_base;
+    uint32_t pan_ph, pan_inc;
 };
 
 Voice     v[wfc::kVoices];
@@ -260,6 +262,7 @@ void Init(float sample_rate, int block_size)
         vo.hz = 220.0f;
         vo.vlp.Reset();
         vo.llp.Reset();
+        vo.llp2.Reset();
         vo.vlp.Set(400.0f, 0.8f);
         vo.llp.Set(2000.0f, 0.5f);
         vo.dly = vo.dly_t = 0.2f;
@@ -282,11 +285,15 @@ void Init(float sample_rate, int block_size)
 
         // Equal power, matching Web Audio's StereoPanner, at the prototype's
         // fixed spread of (i / 3 * 2 - 1) * .6
-        const float pan = ((float)i / (float)(wfc::kVoices - 1) * 2.0f - 1.0f)
-                          * 0.6f;
-        const float a = (pan + 1.0f) * 0.25f * 3.14159265f;
-        vo.pan_l      = cosf(a);
-        vo.pan_r      = sinf(a);
+        vo.pan_base = ((float)i / (float)(wfc::kVoices - 1) * 2.0f - 1.0f)
+                      * 0.6f;
+        // Its own slow drift, deliberately not the LFO: a static image in an
+        // instrument made of slow movement is the thing that sounds fixed, and
+        // this has to be there whatever the LFO knob is doing
+        vo.pan_ph  = (uint32_t)(Rand() * 4294967296.0f);
+        vo.pan_inc = (uint32_t)((0.02f + Rand() * 0.04f) * 4294967296.0f
+                                * (float)block * inv_sr);
+        vo.pan_l = vo.pan_r = 0.70710678f;
     }
     Recoeff((float)block * inv_sr, wfc::DelayGlide());
 }
@@ -451,18 +458,28 @@ void Control(float now, float dt)
         vo.lph += vo.linc;
         vo.lfo = SinQ(vo.lph);
 
+        // Where the voice is, drifting slowly
+        vo.pan_ph += vo.pan_inc;
+        const float pan = Clamp(vo.pan_base + SinQ(vo.pan_ph) * 0.32f,
+                                -1.0f, 1.0f);
+        const float a = (pan + 1.0f) * 0.25f * 3.14159265f;
+        vo.pan_l      = cosf(a);
+        vo.pan_r      = sinf(a);
+
         // The filters take their coefficients once a tick, not once a sample
         vo.vlp.Set(vo.vcut, 0.8f);
         vo.llp.Set(vo.lcut, 0.5f);
+        vo.llp2.Set(vo.lcut, 0.5f);
     }
 }
 
-void Process(float* out_l, float* out_r, int n)
+void Process(float* out_l, float* out_r, int n, const float* in,
+             float in_mix)
 {
     // Resolved once a block: the LFO and every smoothed value hold still
     // across it, which is what makes the per-sample loop cheap
-    float dsamp[wfc::kVoices], fbg[wfc::kVoices], preg[wfc::kVoices],
-        postg[wfc::kVoices];
+    float dsamp[wfc::kVoices], dsamp2[wfc::kVoices], fbg[wfc::kVoices],
+        preg[wfc::kVoices], postg[wfc::kVoices];
     for(int i = 0; i < wfc::kVoices; i++)
     {
         Voice& vo = v[i];
@@ -470,6 +487,10 @@ void Process(float* out_l, float* out_r, int n)
         // AudioParam does
         const float d = (vo.dly + vo.lfo * vo.l_dly) * sr;
         dsamp[i]      = Clamp(d, 2.0f, (float)(kDelayMax - 2));
+        // A second tap 1.3% further back: at a fifth of a second that is a
+        // couple of milliseconds, so the loop reads as a wide source instead
+        // of one panned point. It never feeds back -- the loop is unchanged.
+        dsamp2[i] = Clamp(dsamp[i] * 1.013f, 2.0f, (float)(kDelayMax - 2));
         fbg[i]        = Clamp(vo.fb + vo.lfo * vo.l_fb, 0.0f, 1.3f);
         preg[i]       = vo.pre + vo.lfo * vo.l_pre;
         if(preg[i] < 0.01f)
@@ -499,6 +520,10 @@ void Process(float* out_l, float* out_r, int n)
                 vo.p[k].phase += vo.p[k].inc;
             }
             src *= 0.3f;
+            // The partials keep running underneath so the fade back is in
+            // phase; at in_mix 1 none of them reaches anything
+            if(in)
+                src = src * (1.0f - in_mix) + in[s] * in_mix * 0.5f;
 
             // The voice itself, before its line
             const float dry = vo.vlp.Process(src) * vo.vca;
@@ -518,6 +543,11 @@ void Process(float* out_l, float* out_r, int n)
             const int   i0  = (vo.wr - di + kDelayMax) % kDelayMax;
             const int   i1  = (i0 - 1 + kDelayMax) % kDelayMax;
             const float out = vo.line[i0] + (vo.line[i1] - vo.line[i0]) * fr;
+            const int   dj  = (int)dsamp2[i];
+            const float fj  = dsamp2[i] - (float)dj;
+            const int   j0  = (vo.wr - dj + kDelayMax) % kDelayMax;
+            const int   j1  = (j0 - 1 + kDelayMax) % kDelayMax;
+            const float o2  = vo.line[j0] + (vo.line[j1] - vo.line[j0]) * fj;
             vo.wr           = (vo.wr + 1) % kDelayMax;
 
             // The loop's filters and its distortion
@@ -528,10 +558,23 @@ void Process(float* out_l, float* out_r, int n)
             const float pst = sh * postg[i];
             vo.post_prev    = pst;
 
-            // Dry voice and wet line both go to the bus, panned together
-            const float mix = dry + pst * vo.wet;
-            l += mix * vo.pan_l;
-            r += mix * vo.pan_r;
+            // Dry voice and wet line both go to the bus, panned together.
+            // In input mode the dry is dropped here: the box passes the input
+            // through once, centred, instead of four panned copies of it.
+            // The side tap gets its own copy of the loop's filters. Shaping
+            // it unfiltered fed the distortion a brighter, hotter signal than
+            // the main tap's, and the right channel came out dirtier than the
+            // left. The taps differ in position only.
+            const float lp2 = vo.llp2.Process(o2);
+            vo.loop_hp2 += (lp2 - vo.loop_hp2) * loop_hp_c;
+            const float pst2 = Shape((lp2 - vo.loop_hp2) * preg[i]) * postg[i];
+
+            // One tap per channel, both at the voice's own position. Panning
+            // the side tap opposite instead only pulled the image to the
+            // centre, which is what a correlated copy does.
+            const float mix = dry * (1.0f - in_mix);
+            l += (mix + pst * vo.wet) * vo.pan_l;
+            r += (mix + pst2 * vo.wet) * vo.pan_r;
         }
         out_l[s] += l;
         out_r[s] += r;

@@ -112,8 +112,8 @@ static void TestKnobFormulas()
     Near("lfoMul", LfoMul(), 0.75f);
     Near("loopCut", LoopCut(), 1722.0f, 1.0f);
     Near("voiceCutMul", VoiceCutMul(), 8.375f, 1e-3f);
-    Near("lapseChance", LapseChance(), 0.0877f, 5e-4f);
-    Near("unrestRate", UnrestRate(), 0.0648f, 5e-4f);
+    Near("lapseChance", LapseChance(), 0.1f, 5e-4f);
+    Near("unrestRate", UnrestRate(), 0.05f, 5e-4f);
 
     printf("rule limits at safe = .7 (HANDOFF 4.4)\n");
     Near("Fpair", Lim().Fpair, 1.8f);
@@ -125,18 +125,21 @@ static void TestKnobFormulas()
     Check("cycleOn at .7", Lim().cycle_on);
 
     // The thresholds the strictness knob crosses
-    K().safe = 0.0f;
+    K().unrest = 1.0f;
+    K().safe   = 0.0f;
     RebuildRules();
     Check("Fself off when loose", Lim().Fself > 8.0f);
     Check("ratioOn off when loose", !Lim().ratio_on);
     Check("cycleOn off when loose", !Lim().cycle_on);
     Check("Lpeak off when loose", Lim().Lpeak > 8.0f);
-    Near("lapseChance loose", LapseChance(), 0.5f);
-    Near("unrestRate loose", UnrestRate(), 0.25f);
+    Near("lapseChance at full unrest", LapseChance(), 0.5f);
+    Near("unrestRate at full unrest", UnrestRate(), 0.25f);
+    K().unrest = 0.0f;
+    Near("lapseChance at no unrest", LapseChance(), 0.0f);
+    Near("unrestRate at no unrest", UnrestRate(), 0.0f);
     K().safe = 1.0f;
+    K().unrest = 0.0f;
     RebuildRules();
-    Near("lapseChance strict", LapseChance(), 0.0f);
-    Near("unrestRate strict", UnrestRate(), 0.0f);
 }
 
 // ---------------------------------------------------------- the ruleset
@@ -158,6 +161,7 @@ static void TestTileTables()
     // Rule 1 at the strict default: FL[4] = 1.08 > Fself = .95, so a voice
     // may not hold a self-ringing loop at all
     K().safe = 0.7f;
+    K().unrest = 0.0f;
     K().fb   = 0.5f;   // fbMul 1.0
     RebuildRules();
     Violation v[32];
@@ -177,6 +181,7 @@ static void TestStrictHealIsClean()
     {
         Init(seed);
         K().safe = 0.95f;   // every limit binding
+        K().unrest = 0.0f;
         RebuildRules();
         float now = 1.0f;
         for(int v = 0; v < kVoices; v++)
@@ -204,6 +209,7 @@ static void TestLooseFlagsNothing()
     {
         Init(seed);
         K().safe = 0.0f;
+        K().unrest = 0.0f;
         RebuildRules();
         float now = 1.0f;
         for(int v = 0; v < kVoices; v++)
@@ -235,6 +241,7 @@ static void TestPressIsLegal()
     {
         Init(seed);
         K().safe = 0.95f;
+        K().unrest = 0.0f;
         RebuildRules();
         float now = 1.0f;
         for(int v = 0; v < kVoices; v++)
@@ -270,6 +277,7 @@ static void TestBreaksBreakAndHeal()
         {
             Init(seed);
             K().safe = 0.95f;
+            K().unrest = 0.0f;
             // The wobble break needs the LFO audible for rule 5 to bite
             K().lfo = 1.0f;
             RebuildRules();
@@ -311,6 +319,7 @@ static void TestWaveIsStaggered()
     printf("the repair arrives as a wave, one hop per voice\n");
     Init(7);
     K().safe = 0.95f;
+    K().unrest = 0.0f;
     RebuildRules();
     float now = 1.0f;
     for(int v = 0; v < kVoices; v++)
@@ -518,6 +527,7 @@ static void TestCableStructure()
     {
         Init(seed);
         K().safe = 0.95f;
+        K().unrest = 0.0f;
         RebuildRules();
         float now = 1.0f;
         for(int v = 0; v < kVoices; v++)
@@ -633,6 +643,117 @@ static void TestLatchSurvivesStealing()
         Check("nothing sounds once the latch is dropped", !Sounding(v));
 }
 
+// The line input is detected, not switched, so the detector is the contract
+static void TestInputDetector()
+{
+    printf("a signal on the input turns it into an effects box\n");
+    synth::Init(48000.0f, kBlock);
+    K().unrest = 0.0f;
+    synth::Press(0);
+
+    float l[kBlock], r[kBlock], in[kBlock];
+    const float dt = (float)kBlock / kSr;
+    float now = 1.0f, ph = 0.0f;
+    bool  finite = true;
+
+    // Three seconds of a 1 kHz tone, which is nowhere near the pad's partials
+    for(int b = 0; b < (int)(3.0f / dt); b++)
+    {
+        for(int i = 0; i < kBlock; i++, ph += 1000.0f / kSr)
+            in[i] = 0.3f * sinf(6.2831853f * ph);
+        now += dt;
+        synth::Control(now);
+        synth::Process(l, r, kBlock, in);
+        for(int i = 0; i < kBlock; i++)
+            if(!isfinite(l[i]) || !isfinite(r[i]))
+                finite = false;
+    }
+    Check("finite with input running", finite);
+    Check("input takes over", synth::InputMix() > 0.98f);
+
+    // It must not let go the moment the player stops, nor hang on for ever
+    memset(in, 0, sizeof(in));
+    for(int b = 0; b < (int)(1.0f / dt); b++)
+    {
+        now += dt;
+        synth::Control(now);
+        synth::Process(l, r, kBlock, in);
+    }
+    Check("a second of quiet does not drop it", synth::InputMix() > 0.98f);
+    for(int b = 0; b < (int)(4.0f / dt); b++)
+    {
+        now += dt;
+        synth::Control(now);
+        synth::Process(l, r, kBlock, in);
+    }
+    Check("four seconds of quiet gives the synth back",
+          synth::InputMix() < 0.02f);
+
+    // And a shell with no capture device never leaves the synth
+    for(int b = 0; b < (int)(3.0f / dt); b++)
+    {
+        now += dt;
+        synth::Control(now);
+        synth::Process(l, r, kBlock);
+    }
+    Check("no input device means no input mode", synth::InputMix() < 0.02f);
+}
+
+static void TestOctaveLeavesHeldVoicesAlone()
+{
+    printf("the octave applies to the next press, not what is sounding\n");
+    synth::Init(48000.0f, kBlock);
+    K().unrest = 0.0f;
+    synth::Press(0);
+    const float was = voices::Pitch(synth::PadVoice(0));
+
+    Check("the octave moved", synth::ShiftOctave(1));
+    Check("a held pad keeps its pitch",
+          fabsf(voices::Pitch(synth::PadVoice(0)) - was) < 0.01f);
+
+    synth::Press(1);
+    const float ratio = voices::Pitch(synth::PadVoice(1))
+                        / (voices::Pitch(synth::PadVoice(0)) * 9.0f / 8.0f);
+    Check("the next press takes the new octave",
+          fabsf(ratio - 2.0f) < 0.01f);
+
+    // And a latched pad that loses its spot comes back at its own pitch
+    synth::Latch(true);
+    synth::Release(0);
+    synth::Release(1);
+    synth::ShiftOctave(1);
+    for(int p = 2; p < 6; p++)
+        synth::Press(p);
+    for(int p = 2; p < 6; p++)
+        synth::Release(p);
+    Check("a reclaimed latch keeps its own octave",
+          fabsf(voices::Pitch(synth::PadVoice(0)) - was) < 0.01f);
+}
+
+static void TestTune()
+{
+    printf("tune bends what is already sounding, and detents at centre\n");
+    synth::Init(48000.0f, kBlock);
+    K().unrest = 0.0f;
+    synth::Press(0);
+    const float centre = voices::Pitch(synth::PadVoice(0));
+
+    synth::SetKnob(7, 1.0f);
+    Near("an octave up at the top", synth::PadHz(0) / centre, 2.0f, 1e-3f);
+    Check("the sounding voice followed",
+          voices::Pitch(synth::PadVoice(0)) > centre * 1.9f);
+    synth::SetKnob(7, 0.0f);
+    Near("an octave down at the bottom", synth::PadHz(0) / centre, 0.5f, 1e-3f);
+
+    synth::SetKnob(7, 0.503f);
+    Near("the centre detent is exact", synth::PadHz(0), centre, 1e-3f);
+
+    // And the octave buttons stay per-press, which tune deliberately is not
+    synth::SetKnob(7, 0.5f);
+    synth::ShiftOctave(1);
+    Near("the octave still leaves it alone", synth::PadHz(0), centre, 1e-3f);
+}
+
 static void TestSilence()
 {
     printf("nothing held is silent\n");
@@ -683,6 +804,7 @@ static void TestNeverBlowsUp()
         K().filter = corner ? 1.0f : (float)(seed % 9) / 8.0f;
         K().lfo    = corner ? 1.0f : (float)(seed % 4) / 3.0f;
         K().safe   = corner ? 0.0f : (float)(seed % 13) / 12.0f;
+        K().unrest = 0.0f;
         RebuildRules();
 
         float now = 1.0f;
@@ -759,6 +881,7 @@ static void TestCableCarries()
     Init(3);
     voices::Init(kSr, kBlock);
     K().safe = 0.0f;   // no rule may undo the cable
+    K().unrest = 0.0f;
     RebuildRules();
     float now = 1.0f;
     Start(now, 2);
@@ -789,6 +912,9 @@ int SelfTest()
     TestRule3CanBeUnsatisfiable();
     TestCableStructure();
     TestLatchSurvivesStealing();
+    TestOctaveLeavesHeldVoicesAlone();
+    TestTune();
+    TestInputDetector();
     TestSilence();
     TestSounds();
     TestNeverBlowsUp();

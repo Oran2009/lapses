@@ -28,8 +28,9 @@ bool Latched();
 bool ShiftOctave(int delta);
 int  Octave();
 
-// 0..1 each, in the order of HANDOFF 4.2. Rebuilds the rules and schedules
-// the debounced heal.
+constexpr int kKnobs = 8;   // HANDOFF 4.2's six, plus Unrest and Space
+
+// 0..1 each. Rebuilds the rules and schedules the debounced heal.
 void SetKnob(int i, float v);
 float Knob(int i);
 const char* KnobName(int i);
@@ -37,8 +38,13 @@ const char* KnobName(int i);
 // Advance the control side. Call once per audio block.
 void Control(float now);
 
-// One block, replacing whatever is in the buffers.
-void Process(float* l, float* r, int n);
+// One block, replacing whatever is in the buffers. `in` is the line input,
+// mono, or null when the shell has none: a signal on it turns the instrument
+// into an effects box, detected rather than switched.
+void Process(float* l, float* r, int n, const float* in = nullptr);
+
+// 0..1: how far the line input has taken over from the partials
+float InputMix();
 
 // 0..1, for the LED: tracks the voices and so follows the release
 float Level();
@@ -46,6 +52,14 @@ float Level();
 // Output trim in 3 dB steps, 0 down to -30 dB. True when it moved.
 bool ShiftGain(int delta);
 float GainDb();
+
+// Break a rule now, or settle everything now
+void Break();
+void Settle();
+
+// Hold the solver where it is
+void Freeze(bool on);
+bool Frozen();
 
 // Which voice each pad is driving, -1 for none (for the display)
 int PadVoice(int pad);

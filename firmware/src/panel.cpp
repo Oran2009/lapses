@@ -90,20 +90,33 @@ void Poll()
 {
     for(int i = 0; i < kAnalog; i++)
         analog[i].Process();
-    // The panel's own order, against the knob order in HANDOFF 4.2. -1 is a
-    // control that is wired but not yet spoken for: S35 and the S36 fader.
-    static const int kKnobOf[kAnalog] = {4, 2, 1, 0, 3, -1, -1, 5};
+    // S30..S35 then the two faders, against the engine's knob order
+    static const int kKnobOf[kAnalog] = {4, 2, 1, 0, 3, 7, 6, 5};
     for(int i = 0; i < kAnalog; i++)
-        if(kKnobOf[i] >= 0)
-            synth::SetKnob(kKnobOf[i], analog[i].Value());
+        synth::SetKnob(kKnobOf[i], analog[i].Value());
 
     // S07/S08 held down latches, and keeps latching, so a pad pressed while
     // it is down joins the others. Centre drops the lot.
-    const bool sw_down = switch_a.Read() == Switch3::POS_DOWN;
+    const int   a        = switch_a.Read();
+    const bool  sw_down  = a == Switch3::POS_DOWN;
     static bool was_down = false;
     if(sw_down || was_down)
         synth::Latch(sw_down);
     was_down = sw_down;
+    // Up holds the solver: down latches the pads, up latches the state
+    synth::Freeze(a == Switch3::POS_UP);
+
+    // S09/S10 makes the rules playable instead of only observed
+    static int last_b = -1;
+    const int  b      = switch_b.Read();
+    if(b != last_b)
+    {
+        if(b == Switch3::POS_UP)
+            synth::Break();
+        else if(b == Switch3::POS_DOWN)
+            synth::Settle();
+        last_b = b;
+    }
 
     const uint16_t changed = (uint16_t)(pad_state ^ last_pads);
     for(int i = 0; i < kPads; i++)

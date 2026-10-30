@@ -9,6 +9,7 @@
 //   octave   Z / X
 //   volume   - / =
 //   knobs    drag with the mouse, or F1..F6 then arrow keys
+//   break    B,   settle  N,   freeze  C
 //   panic    escape
 
 #include "synth.h"
@@ -42,6 +43,28 @@ HANDLE     wake = nullptr;       // WaveProc signals, the audio thread fills
 volatile LONG stop_audio = 0;
 CRITICAL_SECTION engine_cs;      // the window thread's input vs the render
 
+// Capture, so the effects box can be heard here and not only on the Touch 2.
+// waveIn mirrors waveOut: prepare, queue, and re-add from the audio thread.
+constexpr int kRing = kBufFrames * kBufs * 4;
+// The renderer keeps a whole output queue in flight, so it asks for input it
+// has not been handed yet. Nothing may be taken from the ring until it holds
+// that much: starting early is what made it alternate signal and silence.
+constexpr int kPrime = kBufFrames * (kBufs + 2);
+HWAVEIN       hwi = nullptr;
+WAVEHDR       ihdr[kBufs];
+short         ibuf[kBufs][kBufFrames];
+float         in_ring[kRing];
+int           in_w = 0, in_r = 0;
+bool          in_ready = false;
+float         in_last = 0.0f;
+// Capture and render share neither a clock nor, necessarily, a rate: measured
+// here, capture ran 17% ahead of what the renderer asked for. So the ring is
+// read at a fractional step nudged to hold its level at kPrime. Dropping the
+// surplus a sample at a time is what crackled.
+double        in_pos = 0.0, in_step = 1.0;
+
+int InRingUsed() { return (in_w - in_r + kRing) % kRing; }
+
 double start_qpc = 0, qpc_freq = 1;
 
 float Now()
@@ -53,12 +76,36 @@ float Now()
 
 void Fill(WAVEHDR* h)
 {
-    float l[kBlock], r[kBlock];
+    float  l[kBlock], r[kBlock], in[kBlock];
     short* out = (short*)h->lpData;
     for(int off = 0; off < kBufFrames; off += kBlock)
     {
+        if(!in_ready && InRingUsed() >= kPrime)
+            in_ready = true;
+        {
+            const double err = (double)(InRingUsed() - kPrime) / (double)kPrime;
+            const double st  = 1.0 + err * 0.08;
+            in_step          = st < 0.75 ? 0.75 : (st > 1.25 ? 1.25 : st);
+        }
+        for(int i = 0; i < kBlock; i++)
+        {
+            if(in_ready && in_r != in_w)
+            {
+                const float a = in_ring[in_r];
+                const float b = in_ring[(in_r + 1) % kRing];
+                in_last       = a + (b - a) * (float)in_pos;
+                in_pos += in_step;
+                while(in_pos >= 1.0 && in_r != in_w)
+                {
+                    in_pos -= 1.0;
+                    in_r = (in_r + 1) % kRing;
+                }
+            }
+            // Holding the last sample is a dull moment; a zero is a click
+            in[i] = in_ready ? in_last : 0.0f;
+        }
         synth::Control(Now());
-        synth::Process(l, r, kBlock);
+        synth::Process(l, r, kBlock, hwi ? in : nullptr);
         for(int i = 0; i < kBlock; i++)
         {
             out[(off + i) * 2]     = (short)(l[i] * 32000.0f);
@@ -79,6 +126,62 @@ void CALLBACK WaveProc(HWAVEOUT, UINT msg, DWORD_PTR, DWORD_PTR p1, DWORD_PTR)
 }
 
 DWORD WINAPI AudioThread(LPVOID);
+
+// Default capture device, mono, same rate. Absent is not an error: without it
+// the instrument is simply always a synth here.
+void CaptureStart()
+{
+    WAVEFORMATEX wf    = {};
+    wf.wFormatTag      = WAVE_FORMAT_PCM;
+    wf.nChannels       = 1;
+    wf.nSamplesPerSec  = kSr;
+    wf.wBitsPerSample  = 16;
+    wf.nBlockAlign     = 2;
+    wf.nAvgBytesPerSec = kSr * 2;
+    if(waveInGetNumDevs() == 0
+       || waveInOpen(&hwi, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL)
+              != MMSYSERR_NOERROR)
+    {
+        hwi = nullptr;
+        return;
+    }
+    for(int i = 0; i < kBufs; i++)
+    {
+        ihdr[i]                = {};
+        ihdr[i].lpData         = (LPSTR)ibuf[i];
+        ihdr[i].dwBufferLength = sizeof(ibuf[i]);
+        waveInPrepareHeader(hwi, &ihdr[i], sizeof(WAVEHDR));
+        waveInAddBuffer(hwi, &ihdr[i], sizeof(WAVEHDR));
+    }
+    in_w = in_r = 0;
+    in_ready = false;
+    in_last  = 0.0f;
+    in_pos   = 0.0;
+    in_step  = 1.0;
+    waveInStart(hwi);
+}
+
+// Drains whatever capture has finished into the ring and re-queues it
+void CapturePump()
+{
+    if(!hwi)
+        return;
+    for(int i = 0; i < kBufs; i++)
+        if(ihdr[i].dwFlags & WHDR_DONE)
+        {
+            const short* p = (const short*)ihdr[i].lpData;
+            for(int j = 0; j < kBufFrames; j++)
+            {
+                in_ring[in_w] = (float)p[j] * (1.0f / 32768.0f);
+                in_w          = (in_w + 1) % kRing;
+            }
+            ihdr[i].dwFlags &= ~WHDR_DONE;
+            waveInAddBuffer(hwi, &ihdr[i], sizeof(WAVEHDR));
+        }
+    // A backstop only: the fractional read is what holds the level normally
+    while(InRingUsed() > kRing - kBufFrames * 2)
+        in_r = (in_r + 1) % kRing;
+}
 
 bool AudioStart()
 {
@@ -103,6 +206,9 @@ bool AudioStart()
         hdr[i].dwBufferLength   = sizeof(buf[i]);
         waveOutPrepareHeader(hwo, &hdr[i], sizeof(WAVEHDR));
     }
+    // ponytail: off while the synth side is being tuned, same as the Daisy
+    // shell. Put this call back to re-enable.
+    // CaptureStart();
     CloseHandle(CreateThread(nullptr, 0, AudioThread, nullptr, 0, nullptr));
     return true;
 }
@@ -114,6 +220,7 @@ DWORD WINAPI AudioThread(LPVOID)
     timeBeginPeriod(1);
     while(!stop_audio)
     {
+        CapturePump();
         for(int i = 0; i < kBufs; i++)
             if(!(hdr[i].dwFlags & WHDR_INQUEUE))
             {
@@ -130,7 +237,7 @@ DWORD WINAPI AudioThread(LPVOID)
 
 // ------------------------------------------------------------------- the UI
 
-int   sel_knob = -1;      // the knob F1..F6 picked
+int   sel_knob = -1;      // the knob F1..F8 picked
 int   drag     = -1;      // the knob the mouse has hold of
 int   mouse_pad = -1;     // the pad the mouse pressed, so key-held pads survive
 POINT drag_from;
@@ -142,13 +249,13 @@ struct Rect
 {
     int x, y, w, h;
 };
-Rect knob_r[6], pad_r[synth::kPads];
+Rect knob_r[synth::kKnobs], pad_r[synth::kPads];
 
 void Layout(int W, int H)
 {
     const int m = 16;
-    const int kw = (W - m * 7) / 6;
-    for(int i = 0; i < 6; i++)
+    const int kw = (W - m * (synth::kKnobs + 1)) / synth::kKnobs;
+    for(int i = 0; i < synth::kKnobs; i++)
         knob_r[i] = {m + i * (kw + m), H - 150, kw, 54};
     const int pw = (W - m * 8) / 7;
     for(int i = 0; i < synth::kPads; i++)
@@ -224,7 +331,11 @@ void Paint(HWND hw)
     snprintf(hdr2, sizeof(hdr2),
              "oct %+d   out %.0f dB   %s   lapse %.2f  unrest %.2f/s",
              synth::Octave(), synth::GainDb(),
-             synth::Latched() ? "LATCHED" : "       ", wfc::LapseChance(),
+             synth::InputMix() > 0.5f
+                     ? "INPUT  "
+                     : (synth::Frozen()
+                            ? "FROZEN "
+                            : (synth::Latched() ? "LATCHED" : "       ")), wfc::LapseChance(),
              wfc::UnrestRate());
     Text(dc, 16, 30, hdr2, dim);
 
@@ -269,7 +380,7 @@ void Paint(HWND hw)
         }
     }
 
-    for(int i = 0; i < 6; i++)
+    for(int i = 0; i < synth::kKnobs; i++)
     {
         Bar(dc, {knob_r[i].x, knob_r[i].y + 20, knob_r[i].w, 14},
             synth::Knob(i), i == sel_knob ? ok : RGB(96, 118, 170));
@@ -327,6 +438,12 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
                     synth::Press(p);
             if(w == VK_SPACE)
                 synth::Latch(!synth::Latched());
+            if(w == 'B')
+                synth::Break();
+            if(w == 'N')
+                synth::Settle();
+            if(w == 'C')
+                synth::Freeze(!synth::Frozen());
             if(w == 'Z')
                 synth::ShiftOctave(-1);
             if(w == 'X')
@@ -335,7 +452,7 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
                 synth::ShiftGain(-1);
             if(w == VK_OEM_PLUS)
                 synth::ShiftGain(1);
-            if(w >= VK_F1 && w <= VK_F6)
+            if(w >= VK_F1 && w <= VK_F8)
                 sel_knob = (int)w - VK_F1;
             if((w == VK_LEFT || w == VK_RIGHT) && sel_knob >= 0)
                 synth::SetKnob(sel_knob,
@@ -364,7 +481,7 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
         {
             Lock lk;
             const int mx = LOWORD(l), my = HIWORD(l);
-            for(int i = 0; i < 6; i++)
+            for(int i = 0; i < synth::kKnobs; i++)
                 if(mx >= knob_r[i].x && mx < knob_r[i].x + knob_r[i].w
                    && my >= knob_r[i].y && my < knob_r[i].y + knob_r[i].h)
                 {
@@ -469,6 +586,13 @@ done:
     InterlockedExchange(&stop_audio, 1);
     SetEvent(wake);
     Sleep(30);
+    if(hwi)
+    {
+        waveInReset(hwi);
+        for(int i = 0; i < kBufs; i++)
+            waveInUnprepareHeader(hwi, &ihdr[i], sizeof(WAVEHDR));
+        waveInClose(hwi);
+    }
     waveOutReset(hwo);
     for(int i = 0; i < kBufs; i++)
         waveOutUnprepareHeader(hwo, &hdr[i], sizeof(WAVEHDR));

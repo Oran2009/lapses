@@ -40,7 +40,14 @@ void Control(float now, float dt);
 
 // One block of audio. Adds into out_l/out_r, which must already be the dry
 // bus the caller wants (normally silence).
-void Process(float* out_l, float* out_r, int n);
+//
+// `in_mix` crossfades every voice's source from its own partials to `in`: at
+// 1 the partials are gone and the loops are running on the line input alone,
+// which is the effects box. The pads still gate the loops and still tune the
+// delay snap, so a hard-driven loop rings at the pad's pitch -- that ringing
+// is the resonator, not a surviving oscillator.
+void Process(float* out_l, float* out_r, int n, const float* in = nullptr,
+             float in_mix = 0.0f);
 
 // 0..1, the voice's envelope. The pad allocator prefers the quietest voice.
 float Amp(int v);

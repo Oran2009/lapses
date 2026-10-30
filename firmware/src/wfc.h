@@ -52,7 +52,7 @@ inline int LfoDepth(int o) { return o % 4; }
 // The six knobs, each 0..1 (4.2)
 struct Knobs
 {
-    float delay, fb, drive, filter, lfo, safe;
+    float delay, fb, drive, filter, lfo, safe, unrest, tune;
 };
 
 // What the rules allow at the current strictness (4.4)
@@ -100,6 +100,12 @@ float LfoMul();
 float LoopCut();
 float VoiceCutMul();
 float LapseChance();
+
+// Holds the solver: no repairs, no lapses, no unrest. Scheduled changes still
+// land and a press still rolls its voice, so the texture freezes without the
+// panel going dead.
+void SetFrozen(bool on);
+bool Frozen();
 float UnrestRate();
 
 // ---------------------------------------------------------------- the state

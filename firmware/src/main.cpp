@@ -19,11 +19,20 @@ float     now_s     = 0.0f;
 float     block_dt  = 0.0f;
 uint32_t  blink_until = 0;
 
-void AudioCallback(AudioHandle::InputBuffer, AudioHandle::OutputBuffer out,
+void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
                    size_t size)
 {
     now_s += block_dt;
     synth::Control(now_s);
+
+    // ponytail: input mode is off while the synth side is being tuned. The
+    // engine path and its tests are intact -- put `mono` back to re-enable.
+    //
+    // The loops are panned themselves, so the input goes in mono
+    float mono[kBlock];
+    for(size_t i = 0; i < size; i++)
+        mono[i] = (in[0][i] + in[1][i]) * 0.5f;
+    (void)mono;
 
     float l[kBlock], r[kBlock];
     synth::Process(l, r, (int)size);
