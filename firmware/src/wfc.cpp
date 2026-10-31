@@ -36,8 +36,7 @@ inline float Smooth(float a, float b, float x)
     return k * k * (3.0f - 2.0f * k);
 }
 
-Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.5f};
-// Tune's centre is concert pitch, so 0.5 is where it boots
+Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f};
 bool   frozen = false;
 int    cable_mode = 0;   // 0 none, 1 feed, 2 mod
 const int* rp_tiles = nullptr;   // the tiles the patch search weighs
@@ -48,6 +47,11 @@ Limits limits = {};
 // which (pair rules 1 to 3), and which a voice may hold at all (rule 1)
 uint8_t compat[kTiles * kTiles];
 uint8_t self_ok[kTiles];
+// 10,000 pairs, so the tables are rebuilt when something is about to read
+// them rather than every time a knob twitches. A knob moves at the block
+// rate; a solve runs a few times a second.
+bool tables_dirty = true;
+void EnsureTables();
 
 // Logical: what WFC has decided. Shown: what the audio has reached.
 int16_t tile[kVoices], shown_tile[kVoices];
@@ -78,23 +82,66 @@ struct Event
     int     kind;   // 2 = break, 1 = repair
     Change  ch;
 };
-// ponytail: a fixed queue. Four voices with a break landing on top of a
-// repair is 8; 16 is two of those. Grow it if events are ever dropped.
-constexpr int kMaxEvents = 16;
+// ponytail: a fixed queue. Worst case per group in one Tick is 12 events (heal,
+// lapse, unrest and a chained break, 3 voices each), but knob_settle can Heal
+// each group twice and earlier ticks' events carry over: measured about 30 plus
+// carry. 48 holds that; recount if a Tick starts scheduling more.
+constexpr int kMaxEvents = 48;
 Event         events[kMaxEvents];
-int           n_events = 0;
+int           n_events = 0, n_dropped = 0;
 
-float heal_at = 0, next_lapse = 0, next_unrest = 0, knob_settle = 0;
+float heal_at[kGroups], next_lapse[kGroups], next_unrest[kGroups];
+
+bool  joined      = false;
+float solve_fm    = -1.0f;
+float table_fm    = -1.0f;
+// Duck, six voices, default knobs, P05 down vs up: 0.69x load at Unrest 0, 0.58x at 0.3
+constexpr float kChargeGain = 4.0f;
+float knob_settle = 0;
 
 // ------------------------------------------------------------- the sounding
 
-int Active(int* act)
+int Active(int* act, int group)
 {
     int n = 0;
     for(int v = 0; v < kVoices; v++)
-        if(sounding[v])
+        if(sounding[v] && (group < 0 || GroupOf(v) == group))
             act[n++] = v;
     return n;
+}
+
+// What the rules read in place of FbMul() for a group: its own feedback
+// inflated by the louder group's shown load. The audio never sees it. Writes
+// nothing, so Diagnose can call it from the window thread; its reads of shown
+// state are unsynchronised on purpose, a torn one costs a frame of diagnostic.
+float ChargedFb(int group)
+{
+    const float fm = FbMul();
+    if(!joined || group < 0)
+        return fm;
+    // Louder group, own included: charging only the other group let one half
+    // stay loud while the other paid
+    float gl[kGroups] = {};
+    for(int v = 0; v < kVoices; v++)
+        if(sounding[v])
+            gl[GroupOf(v)] += FL[TileF(shown_tile[v])];
+    const float load = fmaxf(gl[0], gl[1]);
+    // Capped so the quietest tile always passes every per-tile rule: an empty
+    // table makes RandomTile() fall back to kDefaultTile, which is louder.
+    const float cap = 0.98f
+                      * fminf(fminf(limits.Fself / FL[0],
+                                    limits.Fpair / (2 * FL[0])),
+                              limits.Lpeak / FL[0]);
+    return fmaxf(fm, fminf(fm * (1.0f + kChargeGain * load / kGroupSize), cap));
+}
+
+// The charge is fixed for a whole solve (shown_tile cannot move mid-solve), and
+// the mod search reads it thousands of times, so the solve entry caches it.
+void SetSolveGroup(int g)
+{
+    solve_fm = ChargedFb(g);
+    if(solve_fm != table_fm)
+        tables_dirty = true;
 }
 
 // The repair wave reaches the most recently started voice first
@@ -132,11 +179,11 @@ bool OkRatio(float a, float b)
 // `in_amt` is the cable depth arriving at this voice, which only counts in
 // cross-modulation: there it is spent on the same tap and the same feedback
 // the voice modulates itself with, so it belongs in the same peak.
-float ModPeak(int t, int o, float in_amt)
+float ModPeak(int t, int o, float in_amt, float fm)
 {
     const float dp = DP[ModDepthOf(o)] * ModMul()
                      + (cable_mode == 2 ? 0.3f * in_amt : 0.0f);
-    return (FL[TileF(t)] * FbMul() + 0.2f * dp) * (1.0f + 0.35f * dp);
+    return (FL[TileF(t)] * fm + 0.2f * dp) * (1.0f + 0.35f * dp);
 }
 
 // How much cable is arriving at each sounding voice, as a sum of amounts.
@@ -168,8 +215,6 @@ void InAmounts(const int8_t* pa, const int* act, int n, float* in_amt,
 void SetModIn(const int8_t* pa, const int* act, int n)
 {
     int in_deg[kVoices];
-    for(int i = 0; i < kVoices; i++)
-        rm_in[i] = 0.0f;
     InAmounts(pa, act, n, rm_in, in_deg);
 }
 
@@ -222,7 +267,7 @@ bool PatchesOK(const int8_t* pa, const int* act, int n, const int* tiles)
             return false;
         // Rule 7b: the flood budget, feed only
         if(cable_mode == 1 && tiles
-           && FL[TileF(tiles[act[i]])] * FbMul() + in_amt[act[i]]
+           && FL[TileF(tiles[act[i]])] * solve_fm + in_amt[act[i]]
                   > limits.Iflood)
             return false;
     }
@@ -358,6 +403,7 @@ float TileDist(int a, int b)
 int Repair(const int* nodes, int n, const int* order, int fixed_v,
            int fixed_t, int* out)
 {
+    EnsureTables();
     for(int attempt = 0; attempt < 4; attempt++)
     {
         static uint8_t dom[kVoices][kTiles];
@@ -469,7 +515,8 @@ void RpRec(int i)
     const int n = rp_others[i];
     for(int o = 0; o < kOpts; o++)
     {
-        if(o && OptTarget(o) == n)
+        // Cables never cross groups
+        if(o && (OptTarget(o) == n || GroupOf(OptTarget(o)) != GroupOf(n)))
             continue;
         rp_trial[n] = (int8_t)o;
         RpRec(i + 1);
@@ -525,7 +572,7 @@ void RmRec(int i)
     const int n = rm_others[i];
     for(int o = 0; o < kModOpts; o++)
     {
-        if(ModPeak(rm_tiles[n], o, rm_in[n]) > limits.Lpeak)
+        if(ModPeak(rm_tiles[n], o, rm_in[n], solve_fm) > limits.Lpeak)
             continue;
         rm_trial[n] = (int8_t)o;
         RmRec(i + 1);
@@ -543,7 +590,7 @@ bool RepairMod(const int* act, int n, int fixed_v, int fixed_opt,
     memcpy(rm_trial, mod_opt, sizeof(rm_trial));
     if(fixed_v >= 0)
     {
-        if(ModPeak(tl[fixed_v], fixed_opt, rm_in[fixed_v]) > limits.Lpeak)
+        if(ModPeak(tl[fixed_v], fixed_opt, rm_in[fixed_v], solve_fm) > limits.Lpeak)
             return false;
         rm_trial[fixed_v] = (int8_t)fixed_opt;
     }
@@ -600,6 +647,8 @@ int ApplyWave(const Change* ch, const int* order, int n, int kind,
             continue;
         if(n_events < kMaxEvents)
             events[n_events++] = Event{t0 + (float)h * iv, v, seq, kind, e};
+        else
+            n_dropped++;
         changed++;
     }
     return changed;
@@ -610,6 +659,7 @@ int ApplyWave(const Change* ch, const int* order, int n, int kind,
 // New settings are drawn evenly from whatever the rules currently allow
 int RandomTile()
 {
+    EnsureTables();
     int list[kTiles], n = 0;
     for(int t = 0; t < kTiles; t++)
         if(self_ok[t])
@@ -630,7 +680,7 @@ int RandomPatchOpt(int v, const int* act, int n)
         return 0;
     int others[kVoices], no = 0, live[kVoices], nl = 0;
     for(int o = 0; o < kVoices; o++)
-        if(o != v)
+        if(o != v && GroupOf(o) == GroupOf(v))
         {
             others[no++] = o;
             if(InList(act, n, o))
@@ -663,6 +713,9 @@ void          SetCableMode(int m) { cable_mode = m; }
 int           CableMode() { return cable_mode; }
 bool          Frozen() { return frozen; }
 const Limits& Lim() { return limits; }
+
+// For the header only: the audio never sees the charge. 1 when not joined
+float ChargeMul() { return ChargedFb(0) / FbMul(); }
 
 float DelayBase() { return 0.03f * powf(30.0f, knob.delay); }
 float DelayGlide() { return Clamp(DelayBase() * 0.6f, 0.02f, 0.5f); }
@@ -706,7 +759,19 @@ void RebuildRules()
     limits.fan_in       = cable_mode == 1 ? (s > 0.6f ? 1 : 2) : 3;
     limits.connected_on = s > 0.7f;
 
-    const float fm = FbMul(), dm = DrvMul(), base = DelayBase();
+    tables_dirty = true;
+}
+
+namespace
+{
+void EnsureTables()
+{
+    if(!tables_dirty)
+        return;
+    tables_dirty = false;
+
+    const float fm = solve_fm, dm = DrvMul(), base = DelayBase();
+    table_fm       = fm;
     for(int t = 0; t < kTiles; t++)
         self_ok[t] = FL[TileF(t)] * fm <= limits.Fself ? 1 : 0;
     for(int a = 0; a < kTiles; a++)
@@ -725,6 +790,7 @@ void RebuildRules()
             compat[a * kTiles + b] = ok ? 1 : 0;
         }
 }
+}  // namespace
 
 // ---------------------------------------------------------------- the state
 
@@ -748,9 +814,15 @@ void Init(uint32_t seed)
         started_at[v]                                         = 0;
         flash[v]                                              = 0;
     }
-    seq      = 0;
-    n_events = 0;
-    heal_at = next_lapse = next_unrest = knob_settle = 0;
+    seq       = 0;
+    n_events  = 0;
+    n_dropped = 0;
+    for(int g = 0; g < kGroups; g++)
+        heal_at[g] = next_lapse[g] = next_unrest[g] = 0;
+    knob_settle = 0;
+    solve_fm    = -1.0f;
+    frozen      = false;
+    joined      = false;
     RebuildRules();
 }
 
@@ -760,9 +832,20 @@ void SetSounding(int v, bool on, float now)
     if(on)
         started_at[v] = now;
 }
+
+void SetJoined(bool on, float now)
+{
+    if(on == joined)
+        return;
+    joined = on;
+    // The charge changed, so each group must re-solve against it
+    for(int g = 0; g < kGroups; g++)
+        heal_at[g] = now;
+}
 bool  Sounding(int v) { return sounding[v]; }
 float StartedAt(int v) { return started_at[v]; }
 
+int EventsDropped() { return n_dropped; }
 int Tile(int v) { return tile[v]; }
 int Patch(int v) { return patch[v]; }
 int Mod(int v) { return mod_opt[v]; }
@@ -783,8 +866,10 @@ int TakeFlash(int v)
 
 void Pass(int v, float now)
 {
-    int act[kVoices + 1];
-    int n = Active(act);
+    const int g = GroupOf(v);
+    SetSolveGroup(g);
+    int       act[kVoices + 1];
+    int       n = Active(act, g);
     if(!InList(act, n, v))
         act[n++] = v;
 
@@ -854,14 +939,17 @@ void Pass(int v, float now)
     ApplyWave(ch, order, no, 1, 0.0f, now);
 
     if(Rand() < LapseChance())
-        BreakRule(-1, (float)(no + 1) * HopSeconds(), now);
+        BreakRule(-1, g, (float)(no + 1) * HopSeconds(), now);
 }
 
-void Heal(float now)
+void Heal(int g, float now)
 {
-    heal_at = 0;
+    if(g < 0 || g >= kGroups)
+        return;
+    heal_at[g] = 0;
+    SetSolveGroup(g);
     int       act[kVoices];
-    const int n = Active(act);
+    const int n = Active(act, g);
     if(!n)
         return;
     int order[kVoices];
@@ -903,10 +991,19 @@ void Heal(float now)
     ApplyWave(ch, order, n, 1, 0.0f, now);
 }
 
-void BreakRule(int type, float offset, float now)
+void Heal(float now)
 {
+    for(int g = 0; g < kGroups; g++)
+        Heal(g, now);
+}
+
+void BreakRule(int type, int g, float offset, float now)
+{
+    if(g < 0 || g >= kGroups)
+        return;
+    SetSolveGroup(g);
     int       act[kVoices];
-    const int n = Active(act);
+    const int n = Active(act, g);
     if(!n)
         return;
     // Not every break is available: the cable ones need two voices to cross
@@ -987,7 +1084,13 @@ void BreakRule(int type, float offset, float now)
     }
     ApplyWave(ch, order, n, 2, offset, now);
     // WFC comes back for it, but not straight away
-    heal_at = now + offset + 3.0f + Rand() * 4.0f;
+    heal_at[g] = now + offset + 3.0f + Rand() * 4.0f;
+}
+
+void BreakRule(int type, float offset, float now)
+{
+    for(int g = 0; g < kGroups; g++)
+        BreakRule(type, g, offset, now);
 }
 
 void KnobsMoved(float now)
@@ -1033,45 +1136,58 @@ void Tick(float now)
     }
     n_events = keep;
 
-    int       act[kVoices];
-    const int n = Active(act);
-
     if(knob_settle && now > knob_settle)
     {
         knob_settle = 0;
-        if(n)
-            Heal(now);
+        for(int g = 0; g < kGroups; g++)
+        {
+            int act[kVoices];
+            if(Active(act, g))
+                Heal(g, now);
+        }
     }
     if(frozen)
         return;
-    if(heal_at && now > heal_at)
-        Heal(now);
+    for(int g = 0; g < kGroups; g++)
+    {
+        int       act[kVoices];
+        const int n = Active(act, g);
+        if(heal_at[g] && now > heal_at[g])
+            Heal(g, now);
 
-    // Now and then WFC lets a rule go with nobody pressing
-    if(n && LapseChance() > 0.01f && now > next_lapse)
-    {
-        if(next_lapse > 0 && Rand() < 0.6f)
-            BreakRule(-1, 0.0f, now);
-        next_lapse
-            = now + (6.0f + Rand() * 10.0f) / (0.15f + LapseChance() * 4);
-    }
-    // A loose WFC re-rolls sounding voices by itself
-    if(UnrestRate() > 0.01f && n && now > next_unrest)
-    {
-        if(next_unrest > 0)
-            Pass(act[RandInt(n)], now);
-        next_unrest = now + (1.0f / UnrestRate()) * (0.5f + Rand());
+        // Now and then WFC lets a rule go with nobody pressing
+        if(n && LapseChance() > 0.01f && now > next_lapse[g])
+        {
+            if(next_lapse[g] > 0 && Rand() < 0.6f)
+                BreakRule(-1, g, 0.0f, now);
+            next_lapse[g]
+                = now + (6.0f + Rand() * 10.0f) / (0.15f + LapseChance() * 4);
+        }
+        // A loose WFC re-rolls sounding voices by itself
+        if(UnrestRate() > 0.01f && n && now > next_unrest[g])
+        {
+            if(next_unrest[g] > 0)
+                Pass(act[RandInt(n)], now);
+            next_unrest[g] = now + (1.0f / UnrestRate()) * (0.5f + Rand());
+        }
     }
 }
 
 // ----------------------------------------------------------- what is broken
 
-int Diagnose(Violation* out, int max)
+int Diagnose(Violation* out, int max, int group)
 {
+    if(group < 0)
+    {
+        int cnt = 0;
+        for(int g = 0; g < kGroups; g++)
+            cnt += Diagnose(out + cnt, max - cnt, g);
+        return cnt;
+    }
     int         act[kVoices];
-    const int   n   = Active(act);
+    const int   n   = Active(act, group);
     int         cnt = 0;
-    const float fm = FbMul(), dm = DrvMul(), base = DelayBase();
+    const float fm = ChargedFb(group), dm = DrvMul(), base = DelayBase();
     float       in_amt[kVoices] = {};
     int         in_deg[kVoices] = {};
     InAmounts(shown_patch, act, n, in_amt, in_deg);
@@ -1085,10 +1201,10 @@ int Diagnose(Violation* out, int max)
             out[cnt++] = Violation{kEcho, {a, -1}};
         if(cable_mode
            && (DP[ModDepthOf(shown_mod[a])] > 0 || in_amt[a] > 0.0f)
-           && ModPeak(t, shown_mod[a], in_amt[a]) > limits.Lpeak && cnt < max)
+           && ModPeak(t, shown_mod[a], in_amt[a], fm) > limits.Lpeak && cnt < max)
             out[cnt++] = Violation{kWobble, {a, -1}};
         else if(!cable_mode && DP[ModDepthOf(shown_mod[a])] > 0
-                && ModPeak(t, shown_mod[a], 0.0f) > limits.Lpeak && cnt < max)
+                && ModPeak(t, shown_mod[a], 0.0f, fm) > limits.Lpeak && cnt < max)
             out[cnt++] = Violation{kWobble, {a, -1}};
         // Rule 7: fed and ringing at once, which only feed can be
         if(cable_mode == 1 && cnt < max

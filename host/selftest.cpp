@@ -56,7 +56,7 @@ static void Settle(float& now)
 static int MaxVoicesUnderRule3()
 {
     if(!Lim().ratio_on)
-        return kVoices;
+        return kGroupSize;
     int biggest = 1;
     for(int mask = 0; mask < 32; mask++)
     {
@@ -184,7 +184,7 @@ static void TestStrictHealIsClean()
         K().unrest = 0.0f;
         RebuildRules();
         float now = 1.0f;
-        for(int v = 0; v < kVoices; v++)
+        for(int v = 0; v < kGroupSize; v++)
         {
             SetSounding(v, true, now);
             now += 0.01f;
@@ -212,12 +212,12 @@ static void TestLooseFlagsNothing()
         K().unrest = 0.0f;
         RebuildRules();
         float now = 1.0f;
-        for(int v = 0; v < kVoices; v++)
+        for(int v = 0; v < kGroupSize; v++)
         {
             SetSounding(v, true, now);
             now += 0.01f;
         }
-        for(int i = 0; i < 4; i++)
+        for(int i = 0; i < kGroupSize; i++)
         {
             Pass(i, now);
             now += 0.05f;
@@ -237,27 +237,31 @@ static void TestLooseFlagsNothing()
 static void TestPressIsLegal()
 {
     printf("a press settles the sounding voices inside the rules\n");
-    for(uint32_t seed = 1; seed <= 60; seed++)
+    for(int g = 0; g < kGroups; g++)
     {
-        Init(seed);
-        K().safe = 0.95f;
-        K().unrest = 0.0f;
-        RebuildRules();
-        float now = 1.0f;
-        for(int v = 0; v < kVoices; v++)
+        for(uint32_t seed = 1; seed <= 60; seed++)
         {
-            SetSounding(v, true, now);
-            now += 0.01f;
-            Pass(v, now);
-            Settle(now);
-            Violation vio[32];
-            const int n = Diagnose(vio, 32);
-            if(n)
+            const int base = g * kGroupSize;
+            Init(seed);
+            K().safe = 0.95f;
+            K().unrest = 0.0f;
+            RebuildRules();
+            float now = 1.0f;
+            for(int v = base; v < base + kGroupSize; v++)
             {
-                printf("  FAIL seed %u voice %d: %d broken after press (%s)\n",
-                       seed, v, n, BreakName(vio[0].type));
-                fails++;
-                break;
+                SetSounding(v, true, now);
+                now += 0.01f;
+                Pass(v, now);
+                Settle(now);
+                Violation vio[32];
+                const int n = Diagnose(vio, 32);
+                if(n)
+                {
+                    printf("  FAIL seed %u voice %d: %d broken after press (%s)\n",
+                           seed, v, n, BreakName(vio[0].type));
+                    fails++;
+                    break;
+                }
             }
         }
     }
@@ -286,7 +290,7 @@ static void TestBreaksBreakAndHeal()
             K().mod = 1.0f;
             RebuildRules();
             float now = 1.0f;
-            for(int v = 0; v < kVoices; v++)
+            for(int v = 0; v < kGroupSize; v++)
             {
                 SetSounding(v, true, now);
                 now += 0.01f;
@@ -327,7 +331,7 @@ static void TestWaveIsStaggered()
     K().unrest = 0.0f;
     RebuildRules();
     float now = 1.0f;
-    for(int v = 0; v < kVoices; v++)
+    for(int v = 0; v < kGroupSize; v++)
     {
         SetSounding(v, true, now);
         now += 0.01f;
@@ -341,19 +345,19 @@ static void TestWaveIsStaggered()
     Tick(now);   // schedules the heal wave at `now`
 
     int landed_at[kVoices];
-    for(int v = 0; v < kVoices; v++)
+    for(int v = 0; v < kGroupSize; v++)
         landed_at[v] = -1;
     const float hop = HopSeconds();
     for(int step = 0; step < 12; step++)
     {
         Tick(now + (float)step * hop * 0.5f);
-        for(int v = 0; v < kVoices; v++)
+        for(int v = 0; v < kGroupSize; v++)
             if(landed_at[v] < 0 && ShownTile(v) == Tile(v)
                && ShownMod(v) == Mod(v))
                 landed_at[v] = step;
     }
     int first = 99, last = -1;
-    for(int v = 0; v < kVoices; v++)
+    for(int v = 0; v < kGroupSize; v++)
     {
         if(landed_at[v] < 0)
             continue;
@@ -375,7 +379,7 @@ static void TestKnobsLoadTheirRule()
 {
     printf("a knob loads its own rule, from a legal default state\n");
     const int kRuns = 200;
-    for(int nv = 2; nv <= kVoices; nv++)
+    for(int nv = 2; nv <= kGroupSize; nv++)
     {
         int hit[4] = {0, 0, 0, 0};   // drive, feedback, delay, mod
         int unsat[4] = {0, 0, 0, 0};
@@ -528,24 +532,28 @@ static void TestRule3CanBeUnsatisfiable()
 static void TestCableStructure()
 {
     printf("cables: no self patch, no loop when strict\n");
-    for(uint32_t seed = 1; seed <= 60; seed++)
+    for(int g = 0; g < kGroups; g++)
     {
-        Init(seed);
-        K().safe = 0.95f;
-        K().unrest = 0.0f;
-        RebuildRules();
-        float now = 1.0f;
-        for(int v = 0; v < kVoices; v++)
+        for(uint32_t seed = 1; seed <= 60; seed++)
         {
-            SetSounding(v, true, now);
-            now += 0.01f;
-            Pass(v, now);
+            const int base = g * kGroupSize;
+            Init(seed);
+            K().safe = 0.95f;
+            K().unrest = 0.0f;
+            RebuildRules();
+            float now = 1.0f;
+            for(int v = base; v < base + kGroupSize; v++)
+            {
+                SetSounding(v, true, now);
+                now += 0.01f;
+                Pass(v, now);
+            }
+            Settle(now);
+            for(int v = base; v < base + kGroupSize; v++)
+                Check("no voice patches into itself",
+                      OptTarget(ShownPatch(v)) != v);
+            Check("no cable loop when strict", Broken(kCable) == 0);
         }
-        Settle(now);
-        for(int v = 0; v < kVoices; v++)
-            Check("no voice patches into itself",
-                  OptTarget(ShownPatch(v)) != v);
-        Check("no cable loop when strict", Broken(kCable) == 0);
     }
 }
 
@@ -595,13 +603,45 @@ static Run Drive(float& now, float seconds)
 }
 
 
+// Keeps the last block so FiniteOutput can inspect it
+static float g_l[kBlock], g_r[kBlock];
+
+static void AdvanceSeconds(float& now, float secs)
+{
+    const int blocks = (int)(secs * kSr / (float)kBlock);
+    for(int b = 0; b < blocks; b++)
+    {
+        now += (float)kBlock / kSr;
+        synth::Control(now);
+        synth::Process(g_l, g_r, kBlock);
+    }
+}
+
+static bool FiniteOutput()
+{
+    for(int s = 0; s < kBlock; s++)
+        if(!(fabsf(g_l[s]) <= 4.0f) || !(fabsf(g_r[s]) <= 4.0f))
+            return false;
+    return true;
+}
+
+static bool ShownStateValid()
+{
+    for(int v = 0; v < kVoices; v++)
+        if(ShownTile(v) < 0 || ShownTile(v) >= kTiles || ShownPatch(v) < 0
+           || ShownPatch(v) >= kOpts || ShownMod(v) < 0
+           || ShownMod(v) >= kModOpts)
+            return false;
+    return true;
+}
+
 static void Start(float& now, int n_voices)
 {
     for(int i = 0; i < n_voices; i++)
     {
         SetSounding(i, true, now);
         // The prototype's default: major, root A, so pad 1 is 220 Hz
-        static const float hz[4] = {220.0f, 247.5f, 275.0f, 293.33f};
+        static const float hz[6] = {220.0f, 247.5f, 275.0f, 293.33f, 330.0f, 366.67f};
         voices::SetPitch(i, hz[i], true);
         Pass(i, now);
         now += 0.02f;
@@ -610,42 +650,90 @@ static void Start(float& now, int n_voices)
 
 // ------------------------------------------------------------------ tests
 
-// Four latched, then borrow the spots, then give them back
-static void TestLatchSurvivesStealing()
+static void TestPadsAndGroups()
 {
-    printf("latched pads get their voices back\n");
-    synth::Init(48000.0f, 64);
-    for(int p = 0; p < 4; p++)
-        synth::Press(p);
-    synth::Latch(true);
-    for(int p = 0; p < 4; p++)
-        synth::Release(p);
+    printf("six voices, one per pad, in two groups\n");
+    float now = 0.0f;
+    synth::Init(48000.0f, 48);
+    Check("P03 owns voice 0", synth::PadVoice(0) == 0);
+    Check("P04 owns voice 1", synth::PadVoice(1) == 1);
+    Check("P08 owns voice 2", synth::PadVoice(5) == 2);
+    Check("P06 owns voice 3", synth::PadVoice(3) == 3);
+    Check("P07 owns voice 4", synth::PadVoice(4) == 4);
+    Check("P09 owns voice 5", synth::PadVoice(6) == 5);
+    Check("P05 owns no voice", synth::PadVoice(2) == -1);
+    Check("left group", GroupOf(0) == 0 && GroupOf(2) == 0);
+    Check("right group", GroupOf(3) == 1 && GroupOf(5) == 1);
 
-    int on = 0;
     for(int p = 0; p < synth::kPads; p++)
-        on += synth::PadOn(p) ? 1 : 0;
-    Check("four latched pads sound", on == 4);
+        synth::Press(p);
+    Check("no stealing", synth::PadVoice(0) == 0 && synth::PadVoice(6) == 5);
+    AdvanceSeconds(now, 0.5f);
+    Settle(now);
+    Check("output finite", FiniteOutput());
+    Check("shown state valid", ShownStateValid());
 
-    synth::Press(4);
-    synth::Press(5);
-    Check("the borrowed pads took voices",
-          synth::PadVoice(4) >= 0 && synth::PadVoice(5) >= 0);
-    int latched_voiced = 0;
-    for(int p = 0; p < 4; p++)
-        latched_voiced += synth::PadVoice(p) >= 0 ? 1 : 0;
-    Check("two latched pads gave up their voices", latched_voiced == 2);
-    Check("the robbed pads are still latched", synth::Latched());
+    Near("right/left root", synth::PadHz(3) / synth::PadHz(0), 1.5f, 1e-3f);
+    Near("left third", synth::PadHz(1) / synth::PadHz(0), 1.2f, 1e-3f);
+    Near("right third", synth::PadHz(4) / synth::PadHz(3), 1.2f, 1e-3f);
+}
 
-    synth::Release(4);
-    synth::Release(5);
-    latched_voiced = 0;
-    for(int p = 0; p < 4; p++)
-        latched_voiced += synth::PadVoice(p) >= 0 ? 1 : 0;
-    Check("all four latched pads have a voice again", latched_voiced == 4);
-
-    synth::Latch(false);
+static void TestGroupsAreIndependent()
+{
+    printf("a break in one group leaves the other alone\n");
+    float now = 0.0f;
+    synth::Init(48000.0f, 48);
+    for(int p = 0; p < synth::kPads; p++)
+        if(synth::PadVoice(p) >= 0)
+            synth::Press(p);
+    Settle(now);
+    int before[kVoices];
     for(int v = 0; v < kVoices; v++)
-        Check("nothing sounds once the latch is dropped", !Sounding(v));
+        before[v] = ShownTile(v);
+
+    BreakRule(kSwell, 0, 0.0f, now);   // left group only
+    Settle(now);
+    bool right_moved = false, left_moved = false;
+    for(int v = 0; v < kVoices; v++)
+        if(ShownTile(v) != before[v])
+            (GroupOf(v) ? right_moved : left_moved) = true;
+    Check("a left break leaves the right group alone", !right_moved);
+    Check("but it does move the left group", left_moved);
+}
+
+// One Tick can heal, lapse, re-roll for unrest and chain a break in each group
+// before anything is delivered; the press burst alone is only 12 events
+static void TestEventQueueHolds()
+{
+    printf("the event queue holds a full Tick's worth across both groups\n");
+    synth::Init(48000.0f, 48);
+    float now = 0.0f;
+    for(int p = 0; p < synth::kPads; p++)
+        if(synth::PadVoice(p) >= 0)
+            synth::Press(p);
+    Settle(now);
+    for(int g = 0; g < kGroups; g++)
+    {
+        BreakRule(-1, g, 0.0f, now);
+        Heal(g, now);
+        BreakRule(-1, g, 0.0f, now);
+        Pass(g * kGroupSize, now);
+    }
+    Check("no event dropped", EventsDropped() == 0);
+}
+
+static void TestLoneVoiceInGroup()
+{
+    printf("a group of one still settles\n");
+    float now = 0.0f;
+    synth::Init(48000.0f, 48);
+    synth::SetKnob(5, 1.0f);   // Control: strictest
+    synth::SetCableMode(voices::kCableFeed);
+    synth::Press(0);
+    Settle(now);
+    Violation vio[kVoices * kVoices + kVoices];
+    Check("a lone voice is legal", Diagnose(vio, (int)(sizeof(vio) / sizeof(vio[0]))) == 0);
+    synth::SetCableMode(voices::kCableOff);
 }
 
 // The line input is detected, not switched, so the detector is the contract
@@ -718,45 +806,119 @@ static void TestOctaveLeavesHeldVoicesAlone()
 
     synth::Press(1);
     const float ratio = voices::Pitch(synth::PadVoice(1))
-                        / (voices::Pitch(synth::PadVoice(0)) * 9.0f / 8.0f);
+                        / (voices::Pitch(synth::PadVoice(0)) * 6.0f / 5.0f);
     Check("the next press takes the new octave",
           fabsf(ratio - 2.0f) < 0.01f);
-
-    // And a latched pad that loses its spot comes back at its own pitch
-    synth::Latch(true);
-    synth::Release(0);
-    synth::Release(1);
-    synth::ShiftOctave(1);
-    for(int p = 2; p < 6; p++)
-        synth::Press(p);
-    for(int p = 2; p < 6; p++)
-        synth::Release(p);
-    Check("a reclaimed latch keeps its own octave",
-          fabsf(voices::Pitch(synth::PadVoice(0)) - was) < 0.01f);
 }
 
-static void TestTune()
+static void TestHold()
 {
-    printf("tune bends what is already sounding, and detents at centre\n");
-    synth::Init(48000.0f, kBlock);
-    K().unrest = 0.0f;
-    synth::Press(0);
-    const float centre = voices::Pitch(synth::PadVoice(0));
+    printf("hold lengthens the release of the selected group only\n");
+    float now = 0.0f;
+    auto run  = [&](int target, float hold) {
+        synth::Init(48000.0f, kBlock);
+        synth::SetHoldTarget(target);
+        synth::SetKnob(7, hold);
+        synth::Press(0);
+        synth::Press(3);
+        AdvanceSeconds(now, 1.0f);
+        synth::Release(0);
+        synth::Release(3);
+    };
 
-    synth::SetKnob(7, 1.0f);
-    Near("an octave up at the top", synth::PadHz(0) / centre, 2.0f, 1e-3f);
-    Check("the sounding voice followed",
-          voices::Pitch(synth::PadVoice(0)) > centre * 1.9f);
+    run(1, 1.0f);
+    AdvanceSeconds(now, 20.0f);
+    Check("left voice sustains after release", voices::Amp(0) > 0.9f);
+    Check("right voice has released", voices::Amp(3) < 0.01f);
     synth::SetKnob(7, 0.0f);
-    Near("an octave down at the bottom", synth::PadHz(0) / centre, 0.5f, 1e-3f);
+    AdvanceSeconds(now, 20.0f);
+    Check("turning hold down releases it", voices::Amp(0) < 0.01f);
 
-    synth::SetKnob(7, 0.503f);
-    Near("the centre detent is exact", synth::PadHz(0), centre, 1e-3f);
+    run(-1, 1.0f);
+    AdvanceSeconds(now, 20.0f);
+    Check("down aims at the right group",
+          voices::Amp(3) > 0.9f && voices::Amp(0) < 0.01f);
 
-    // And the octave buttons stay per-press, which tune deliberately is not
-    synth::SetKnob(7, 0.5f);
-    synth::ShiftOctave(1);
-    Near("the octave still leaves it alone", synth::PadHz(0), centre, 1e-3f);
+    run(0, 1.0f);
+    AdvanceSeconds(now, 20.0f);
+    Check("centre holds both", voices::Amp(0) > 0.9f && voices::Amp(3) > 0.9f);
+
+    run(1, 0.0f);
+    const float a0  = voices::Amp(0);
+    const float tau = fmaxf(wfc::ReleaseT() / 3.0f, 0.03f);
+    AdvanceSeconds(now, 1.5f);
+    Near("hold 0 is the existing release curve", voices::Amp(0) / a0,
+         expf(-1.5f / tau), 0.01f);
+    Check("it is mid-release", voices::Amp(3) > 0.001f && voices::Amp(3) < 0.5f);
+    Check("hold 0 is the unheld release, exactly", voices::Amp(0) == voices::Amp(3));
+
+    run(1, 0.5f);
+    AdvanceSeconds(now, 1.5f);
+    Check("half hold releases slower", voices::Amp(0) > voices::Amp(3) * 2.0f);
+
+    run(0, 0.5f);
+    AdvanceSeconds(now, 4.0f);
+    synth::SetKnob(7, 1.0f);
+    const float low = voices::Amp(0);
+    synth::Press(0);
+    AdvanceSeconds(now, 0.3f);
+    Check("a press re-triggers regardless of hold",
+          low < 0.5f && wfc::Sounding(0) && voices::Amp(0) > 0.9f);
+}
+
+static void TestHoldIsSounding()
+{
+    printf("a voice HOLD sustains stays in the solver\n");
+    float now = 0.0f;
+    synth::Init(48000.0f, 48);
+    synth::SetHoldTarget(1);
+    synth::SetKnob(7, 1.0f);
+    synth::Press(0);
+    synth::Press(3);
+    AdvanceSeconds(now, 1.0f);
+    synth::Release(0);
+    synth::Release(3);
+    Check("right after release only the selected group still sounds",
+          wfc::Sounding(0) && !wfc::Sounding(3));
+    AdvanceSeconds(now, 10.0f);
+    Check("sustained voice is sounding", wfc::Sounding(0));
+    Check("unselected group is not", !wfc::Sounding(3));
+    Check("a never-pressed voice is not", !wfc::Sounding(1) && !wfc::Sounding(2));
+
+    synth::Press(synth::kConnectorPad);
+    synth::Press(4);
+    AdvanceSeconds(now, 0.5f);
+    Check("a sustained voice is a bridge endpoint",
+          voices::CableCmd(0, 4) > 0.0f || voices::CableCmd(4, 0) > 0.0f);
+    synth::Release(synth::kConnectorPad);
+    synth::Release(4);
+
+    synth::SetKnob(7, 0.0f);
+    AdvanceSeconds(now, 1.0f);
+    Check("hold down ends sounding", !wfc::Sounding(0));
+
+    synth::Init(48000.0f, 48);
+    synth::SetKnob(7, 1.0f);
+    for(int p = 0; p < synth::kPads; p++)
+        if(synth::PadVoice(p) >= 0)
+            synth::Press(p);
+    AdvanceSeconds(now, 2.0f);
+    for(int p = 0; p < synth::kPads; p++)
+        if(synth::PadVoice(p) >= 0)
+            synth::Release(p);
+    AdvanceSeconds(now, 5.0f);
+    int n = 0;
+    for(int v = 0; v < kVoices; v++)
+        n += wfc::Sounding(v);
+    Check("all six sustain", n == 6);
+    for(int g = 0; g < kGroups; g++)
+    {
+        BreakRule(-1, g, 0.0f, now);
+        Heal(g, now);
+        BreakRule(-1, g, 0.0f, now);
+        Pass(g * kGroupSize, now);
+    }
+    Check("no event dropped with six sustaining", EventsDropped() == 0);
 }
 
 static void TestSilence()
@@ -955,26 +1117,32 @@ static void TestCableRules()
                     }
                 }
             }
-            // One structure, not two: reachable either way round
-            bool seen[kVoices] = {};
-            int  stack[kVoices], ns = 0, reached = 1;
-            stack[ns++] = 0;
-            seen[0]     = true;
-            while(ns)
+            // One structure per group, reachable either way round
+            for(int g = 0; g < kGroups; g++)
             {
-                const int cur = stack[--ns];
-                for(int w = 0; w < kVoices; w++)
+                bool seen[kVoices] = {};
+                int  stack[kVoices], ns = 0, reached = 1;
+                const int first = g * kGroupSize;
+                stack[ns++]  = first;
+                seen[first]  = true;
+                while(ns)
                 {
-                    if(seen[w]) continue;
-                    const bool linked
-                        = (ShownPatch(cur) && OptTarget(ShownPatch(cur)) == w)
-                          || (ShownPatch(w) && OptTarget(ShownPatch(w)) == cur);
-                    if(linked)
-                    { seen[w] = true; stack[ns++] = w; reached++; }
+                    const int cur = stack[--ns];
+                    for(int w = first; w < first + kGroupSize; w++)
+                    {
+                        if(seen[w]) continue;
+                        const bool linked
+                            = (ShownPatch(cur)
+                               && OptTarget(ShownPatch(cur)) == w)
+                              || (ShownPatch(w)
+                                  && OptTarget(ShownPatch(w)) == cur);
+                        if(linked)
+                        { seen[w] = true; stack[ns++] = w; reached++; }
+                    }
                 }
+                if(reached < kGroupSize)
+                    split++;
             }
-            if(reached < kVoices)
-                split++;
             runs++;
         }
         printf("  %-4s cycles %d  over budget %d  over fan-in %d  split %d"
@@ -1104,6 +1272,285 @@ static void TestCableCarries()
     voices::SetCableMode(voices::kCableOff);
 }
 
+// Mean over the window of the summed shown load, per group
+static void MeanLoad(float& now, float secs, double* out)
+{
+    out[0] = out[1] = 0;
+    const int n = (int)(secs / 0.05f);
+    for(int i = 0; i < n; i++)
+    {
+        AdvanceSeconds(now, 0.05f);
+        for(int v = 0; v < kVoices; v++)
+            if(Sounding(v))
+                out[v / kGroupSize] += FL[TileF(ShownTile(v))] / n;
+    }
+}
+
+static void TestJoinedDucksAndBlooms()
+{
+    printf("P05 ducks the instrument while held and blooms back on release\n");
+    // Summed over seeds: one seed's start state can leave little to duck
+    const float unrests[2] = {0.0f, 0.3f};
+    double      tot[2][3] = {};
+    double      worst     = 0;
+    for(int u = 0; u < 2; u++)
+        for(uint32_t seed = 11; seed <= 88; seed += 11)
+        {
+            float now = 0.0f;
+            synth::Init(48000.0f, 48);
+            wfc::Init(seed);
+            synth::SetKnob(6, unrests[u]);
+            for(int p = 0; p < synth::kPads; p++)
+                if(synth::PadVoice(p) >= 0)
+                    synth::Press(p);
+            AdvanceSeconds(now, 3.0f);
+            double up[2], down[2], after[2];
+            MeanLoad(now, 20.0f, up);
+            synth::Press(synth::kConnectorPad);
+            AdvanceSeconds(now, 5.0f);
+            MeanLoad(now, 20.0f, down);
+            synth::Release(synth::kConnectorPad);
+            AdvanceSeconds(now, 20.0f);
+            MeanLoad(now, 20.0f, after);
+            tot[u][0] += up[0] + up[1];
+            tot[u][1] += down[0] + down[1];
+            tot[u][2] += after[0] + after[1];
+            const double ratio = (down[0] + down[1]) / (up[0] + up[1]);
+            printf("  unrest %.1f seed %u duck %.2f\n", unrests[u], seed, ratio);
+            if(ratio > worst)
+                worst = ratio;
+        }
+    for(int u = 0; u < 2; u++)
+        printf("  unrest %.1f  up %.2f  down %.2f (%.2f)  after %.2f (%.2f)\n",
+               unrests[u], tot[u][0], tot[u][1], tot[u][1] / tot[u][0],
+               tot[u][2], tot[u][2] / tot[u][0]);
+    // Unrest 0: duck must exist; a re-roll is the only way back up, so no bloom
+    Check("held P05 ducks with Unrest 0", tot[0][1] < 0.8 * tot[0][0]);
+    Check("every seed ducks", worst < 0.9);
+    Check("held P05 ducks hard", tot[1][1] < 0.7 * tot[1][0]);
+    Check("release blooms back near unjoined", tot[1][2] > 0.8 * tot[1][0]);
+}
+
+static double WindowRms(float& now, float secs)
+{
+    double q = 0; int n = 0;
+    for(int i = 0; i < (int)(secs / 0.01f); i++)
+    {
+        AdvanceSeconds(now, 0.01f);
+        for(int k = 0; k < kBlock; k++) { q += g_l[k] * g_l[k]; n++; }
+    }
+    return sqrt(q / n);
+}
+
+static void TestFreezeSwells()
+{
+    printf("freeze mode swells while P05 is held\n");
+    double sum = 0, worst = 1e9;
+    int    n = 0, up = 0;
+    for(int u = 0; u < 2; u++)
+        for(uint32_t seed = 11; seed <= 66; seed += 11)
+        {
+            float now = 0.0f;
+            synth::Init(48000.0f, 48);
+            wfc::Init(seed);
+            synth::SetKnob(6, u ? 0.3f : 0.0f);
+            synth::SetConnectorMode(1);
+            for(int p = 0; p < synth::kPads; p++)
+                if(synth::PadVoice(p) >= 0)
+                    synth::Press(p);
+            AdvanceSeconds(now, 8.0f);
+            const double before = WindowRms(now, 0.5f);
+            synth::Press(synth::kConnectorPad);
+            AdvanceSeconds(now, 1.0f);
+            const double late  = WindowRms(now, 1.0f);
+            const double ratio = late / before;
+            printf("  unrest %.1f seed %u swell %.2fx\n", u ? 0.3f : 0.0f, seed, ratio);
+            sum += ratio;
+            worst = fmin(worst, ratio);
+            if(ratio > 1.15)
+                up++;
+            n++;
+        }
+    printf("  mean %.2fx worst %.2fx\n", sum / n, worst);
+    Check("freeze swells on average", sum / n > 1.4);
+    // Seed 66 never swells (1.03x at both Unrest values); cause unknown, it is
+    // not the bridge endpoints' loudness (measured)
+    Check("most seeds swell", up >= 9);
+    Check("no seed collapses", worst > 0.9);
+}
+
+static void TestConnectorFreeze()
+{
+    printf("freeze mode holds the solver while P05 is down and repairs on release\n");
+    float now = 0.0f;
+    synth::Init(48000.0f, 48);
+    synth::SetKnob(6, 0.0f);
+    for(int p = 0; p < synth::kPads; p++)
+        if(synth::PadVoice(p) >= 0)
+            synth::Press(p);
+    AdvanceSeconds(now, 3.0f);
+    synth::SetConnectorMode(1);
+    synth::Press(synth::kConnectorPad);
+    Check("frozen while held", synth::Frozen());
+    synth::Break();
+    AdvanceSeconds(now, 2.0f);
+    Check("finite while frozen", FiniteOutput());
+    Violation vio[kVoices * kVoices + kVoices];
+    Check("a break stands while frozen", Diagnose(vio, (int)(sizeof(vio) / sizeof(vio[0]))) > 0);
+    synth::Release(synth::kConnectorPad);
+    Check("released unfreezes", !synth::Frozen());
+    // Sooner than the 3 s a scheduled heal takes: the release starts the repair
+    AdvanceSeconds(now, 2.0f);
+    Check("release repairs it", Diagnose(vio, (int)(sizeof(vio) / sizeof(vio[0]))) == 0);
+
+    synth::Freeze(true);
+    synth::Press(synth::kConnectorPad);
+    synth::Release(synth::kConnectorPad);
+    Check("the freeze switch outlives P05", synth::Frozen());
+    synth::Freeze(false);
+
+    // Panel freeze on, something to heal: the release must leave tiles alone
+    synth::Press(synth::kConnectorPad);
+    synth::Release(synth::kConnectorPad);
+    synth::Freeze(true);
+    synth::Break();
+    AdvanceSeconds(now, 2.0f);
+    int before[kVoices];
+    for(int v = 0; v < kVoices; v++)
+        before[v] = ShownTile(v);
+    synth::Press(synth::kConnectorPad);
+    AdvanceSeconds(now, 1.0f);
+    synth::Release(synth::kConnectorPad);
+    AdvanceSeconds(now, 4.0f);
+    bool same = true;
+    for(int v = 0; v < kVoices; v++)
+        same = same && ShownTile(v) == before[v];
+    Check("release leaves a panel-frozen instrument still", same);
+    Check("still frozen", synth::Frozen());
+    synth::Freeze(false);
+    synth::SetConnectorMode(0);
+}
+
+static void TestJoinedEventQueue()
+{
+    printf("joined, six voices and two waves drop nothing\n");
+    float now = 0.0f;
+    synth::Init(48000.0f, 48);
+    for(int p = 0; p < synth::kPads; p++)
+        synth::Press(p);
+    AdvanceSeconds(now, 20.0f);
+    Check("no event dropped", EventsDropped() == 0);
+    Check("every shown value is a real tile", ShownStateValid());
+    Check("still finite", FiniteOutput());
+}
+
+static void TestConnector()
+{
+    printf("P05 patches a bridge between the groups\n");
+    float now = 0.0f;
+    synth::Init(48000.0f, 48);
+    synth::Press(0);
+    synth::Press(3);
+    Settle(now);
+    Check("not joined until P05", !synth::Joined());
+    Check("no bridge before P05", voices::CableCmd(0, 3) == 0.0f);
+
+    synth::Press(synth::kConnectorPad);
+    Check("P05 joins", synth::Joined());
+    Check("a bridge each way",
+          voices::CableCmd(0, 3) > 0.0f && voices::CableCmd(3, 0) > 0.0f);
+    // CableEff is what the bridge drawing reads: it must arrive, and guard
+    AdvanceSeconds(now, 0.5f);
+    Check("bridge is drawn arriving",
+          voices::CableEff(0, 3) > 0.0f && voices::CableEff(3, 0) > 0.0f);
+    Check("out of range and self cables read zero",
+          voices::CableEff(-1, 0) == 0.0f && voices::CableEff(0, 99) == 0.0f
+              && voices::CableEff(0, 0) == 0.0f && voices::CableCmd(0, 99) == 0.0f);
+
+    synth::Release(synth::kConnectorPad);
+    Check("release parts them", !synth::Joined());
+    Check("bridges gone",
+          voices::CableCmd(0, 3) == 0.0f && voices::CableCmd(3, 0) == 0.0f);
+}
+
+static void TestConnectorDegenerate()
+{
+    float now = 0.0f;
+    synth::Init(48000.0f, 48);
+    synth::Press(0);
+    synth::Press(synth::kConnectorPad);
+    Settle(now);
+    Check("one-sided join has no bridge", voices::CableCmd(0, 3) == 0.0f);
+
+    synth::Init(48000.0f, 48);
+    synth::Press(synth::kConnectorPad);
+    Settle(now);
+    Check("joined with silence is legal", synth::Joined());
+    AdvanceSeconds(now, 1.0f);
+    Check("still finite", FiniteOutput());
+}
+
+constexpr int kBridgeBlocks = 400;
+
+static void RenderBridge(int mode, bool join, float* out)
+{
+    float now = 0.0f;
+    synth::Init(48000.0f, 48);
+    synth::SetCableMode(mode);
+    synth::Press(0);
+    synth::Press(3);
+    if(join)
+        synth::Press(synth::kConnectorPad);
+    Settle(now);
+    for(int b = 0; b < kBridgeBlocks; b++)
+    {
+        now += (float)kBlock / kSr;
+        synth::Control(now);
+        synth::Process(g_l, g_r, kBlock);
+        memcpy(out + b * kBlock, g_l, sizeof(g_l));
+    }
+}
+
+static float Delta(const float* a, const float* b)
+{
+    float d = 0.0f;
+    for(int i = 0; i < kBridgeBlocks * kBlock; i++)
+        d += fabsf(a[i] - b[i]);
+    return d;
+}
+
+static void TestBridgeSurvivesCableMode()
+{
+    printf("the bridge is audible in every cable mode\n");
+    float now = 0.0f;
+    synth::Init(48000.0f, 48);
+    synth::Press(0);
+    synth::Press(3);
+    synth::Press(synth::kConnectorPad);
+    Settle(now);
+    for(int m = 0; m < voices::kCableCount; m++)
+    {
+        synth::SetCableMode(m);
+        Settle(now);
+        Check("bridge commanded in every cable mode",
+              voices::CableCmd(0, 3) > 0.0f);
+    }
+    for(int m = 0; m < voices::kCableCount; m++)
+    {
+        static float a[kBridgeBlocks * kBlock], b[kBridgeBlocks * kBlock],
+            c[kBridgeBlocks * kBlock];
+        RenderBridge(m, false, c);   // warm-up: leftover state from earlier tests
+        RenderBridge(m, false, a);
+        RenderBridge(m, false, b);
+        RenderBridge(m, true, c);
+        // The control: two identical runs must match, or the delta is noise
+        Check("unjoined runs repeat exactly", Delta(a, b) == 0.0f);
+        Check("bridge changes the sound in every cable mode",
+              Delta(a, c) > 0.01f);
+    }
+    synth::SetCableMode(voices::kCableOff);
+}
+
 // Something to listen to beside the web prototype
 
 
@@ -1119,9 +1566,17 @@ int SelfTest()
     TestKnobsLoadTheirRule();
     TestRule3CanBeUnsatisfiable();
     TestCableStructure();
-    TestLatchSurvivesStealing();
+    TestPadsAndGroups();
+    TestGroupsAreIndependent();
+    TestLoneVoiceInGroup();
+    TestEventQueueHolds();
+    TestJoinedDucksAndBlooms();
+    TestJoinedEventQueue();
+    TestConnectorFreeze();
+    TestFreezeSwells();
+    TestHold();
+    TestHoldIsSounding();
     TestOctaveLeavesHeldVoicesAlone();
-    TestTune();
     TestInputDetector();
     TestSilence();
     TestSounds();
@@ -1131,6 +1586,9 @@ int SelfTest()
     TestNeverBlowsUp();
     TestSwellRings();
     TestCableCarries();
+    TestConnector();
+    TestConnectorDegenerate();
+    TestBridgeSurvivesCableMode();
 
     if(fails)
         printf("\n%d FAILED\n", fails);

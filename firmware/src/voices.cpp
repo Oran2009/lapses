@@ -17,14 +17,60 @@ namespace
 {
 constexpr int kPartials = 8;
 
-// Not a plain harmonic stack: the top two are unisons of the fundamental and
-// the octave rather than the 7th and 8th harmonics. A full harmonic series at
-// a shallow rolloff is a sawtooth, which is what read as "oscillator"; these
-// two beat against the ones below them instead of buzzing above them.
-constexpr float kRatio[kPartials] = {1.0f, 2.0f, 3.0f, 4.0f,
-                                     5.0f, 6.0f, 1.0f, 2.0f};
+// SPIKE: the voice worlds.
+//
+// A world is its material and its body together, so a model sets both: what
+// the source is made of, and what the loop does with it. The loop is already
+// snapped to a whole number of the voice's own periods, which makes it a
+// tuned resonator -- feed it noise instead of a matching harmonic stack and
+// the loop stops repeating a pitch and starts MAKING one.
+struct Model
+{
+    const char* name;
+    float ratio[kPartials];   // partial frequencies, times the pitch
+    float amp[kPartials];     // and their levels
+    float rolloff;   // scales the pitch-dependent spectral tilt
+    float tone;      // how much of the partial stack reaches the line
+    float noise;     // and how much broadband noise goes in beside it
+    float drive;     // shaping the source before the line, not inside it
+    float motion;    // how fast the partials re-roll; 1 is as it was
+    float cents;     // and how far they wander
+    float dly_mul;   // the loop's length, so the body can be small
+    float damp;      // and its lowpass, so the body can be bright or dead
+    float atk;       // the VCA's speed
+    float out;       // and its level, so the three audition level-matched
+};
+
+// The levels are calibrated so the three sit at about the same loudness with
+// the same knobs; without that the loudest one wins the audition.
+constexpr Model kModel[kModels] = {
+    // 0. As it was: six harmonics and two unisons, breathing slowly.
+    {"as-is",
+     {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 1.0f, 2.0f},
+     {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.45f, 0.45f},
+     1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.6f, 1.0f, 1.0f, 1.0f, 1.00f},
+
+    // 1. Organism: a short body and the drive moved AHEAD of the line, with
+    // partials in beating pairs. This is the Lyra reading -- friction.
+    {"organism",
+     {1.0f, 1.007f, 2.0f, 2.013f, 3.0f, 3.02f, 1.5f, 4.5f},
+     {1.0f, 0.9f, 0.8f, 0.7f, 0.55f, 0.45f, 0.5f, 0.3f},
+     0.55f, 0.85f, 0.03f, 0.75f, 6.0f, 10.0f, 0.10f, 2.2f, 1.0f, 0.29f},
+
+    // 2. Deep: sub-octave partials, a long dark body, almost no top. Mass.
+    {"deep",
+     {0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 0.5f, 1.0f},
+     {1.0f, 0.9f, 0.5f, 0.4f, 0.2f, 0.12f, 0.6f, 0.4f},
+     1.6f, 0.75f, 0.22f, 0.2f, 0.6f, 6.0f, 1.7f, 0.35f, 0.5f, 0.49f},
+};
+
+int cur_model = 0;
+inline const Model& M() { return kModel[cur_model]; }
 
 int   cable_mode = kCableOff;
+// Own matrix, not cab: cab is rendered per cable mode, a bridge must always feed
+struct Bridge { int src; int dst; float amt; } br[2] = {{-1, 0, 0}, {-1, 0, 0}};
+float bri[wfc::kVoices][wfc::kVoices], bri_t[wfc::kVoices][wfc::kVoices];
 
 float sr        = 48000.0f;
 float inv_sr    = 1.0f / 48000.0f;
@@ -223,25 +269,27 @@ void SetPartialFreqs(Voice& vo, bool snap)
     // at the top says with six. Without this the timbre is pitch-proportional
     // and the bottom octave is always the one that gets buried.
     const float tilt = Clamp(1.9f - 0.55f * logf(440.0f / vo.hz) * 1.442695f,
-                             1.25f, 1.9f);
+                             1.25f, 1.9f)
+                       * M().rolloff;
     for(int k = 0; k < kPartials; k++)
     {
-        Partial& p = vo.p[k];
-        p.base     = powf(kRatio[k], -tilt) * (k >= 6 ? 0.45f : 1.0f);
+        Partial&    p  = vo.p[k];
+        const float kk = M().ratio[k];
+        // A touch of inharmonicity, so the partials beat rather than lock
+        const float f  = vo.hz * kk * (1.0f + 0.00015f * kk * kk);
+        const float det = powf(2.0f, p.det / 1200.0f);
+        p.base = powf(kk, -tilt) * M().amp[k];
         if(snap)
             p.lvl = p.lvl_t = p.base;
         else
             p.lvl_t = p.base;
-        const float kk = kRatio[k];
-        // A touch of inharmonicity, so the partials beat rather than lock
-        const float f  = vo.hz * kk * (1.0f + 0.00015f * kk * kk);
-        const float det = powf(2.0f, p.det / 1200.0f);
         p.inc = (uint32_t)(f * det * 4294967296.0f * inv_sr);
         if(snap)
             p.phase = (uint32_t)(Rand() * 4294967296.0f);
     }
 }
 
+bool pad_held[wfc::kVoices];
 }  // namespace
 
 // ----------------------------------------------------------------- the API
@@ -251,12 +299,17 @@ void Init(float sample_rate, int block_size)
     sr     = sample_rate;
     inv_sr = 1.0f / sr;
     block  = block_size;
+    for(bool& h : pad_held)
+        h = true;
     loop_hp_c = 1.0f - expf(-2.0f * 3.14159265f * kLoopHpHz * inv_sr);
 
     for(int i = 0; i <= kSinLen; i++)
         sin_tab[i] = sinf(2.0f * 3.14159265358979f * (float)i / (float)kSinLen);
 
     rng_state = 0x9e3779b9u;
+    memset(bri, 0, sizeof(bri));
+    for(int i = 0; i < 2; i++)
+        SetBridge(i, -1, 0, 0.0f);
     for(int i = 0; i < wfc::kVoices; i++)
     {
         Voice& vo = v[i];
@@ -305,6 +358,25 @@ void Init(float sample_rate, int block_size)
     Recoeff((float)block * inv_sr, wfc::DelayGlide());
 }
 
+// SPIKE: the voice worlds
+void SetModel(int m)
+{
+    m = m >= 0 && m < kModels ? m : 0;
+    // Idempotent: the shells call this every pass, and re-deriving snaps
+    // every partial to a new phase, which is a click per call
+    if(m == cur_model)
+        return;
+    cur_model = m;
+    // The spectrum changes shape, so re-derive it rather than glide into it
+    for(int i = 0; i < wfc::kVoices; i++)
+        SetPartialFreqs(v[i], true);
+}
+int         Model_() { return cur_model; }
+const char* ModelName(int m)
+{
+    return m >= 0 && m < kModels ? kModel[m].name : "?";
+}
+
 void SetCableMode(int m)
 {
     cable_mode = m >= 0 && m < kCableCount ? m : kCableOff;
@@ -315,6 +387,32 @@ const char* CableName(int m)
 {
     static const char* n[kCableCount] = {"off", "feed", "mod"};
     return m >= 0 && m < kCableCount ? n[m] : "?";
+}
+
+static bool Ok(int a, int b)
+{
+    return a >= 0 && a < wfc::kVoices && b >= 0 && b < wfc::kVoices;
+}
+
+void SetBridge(int i, int src, int dst, float amt)
+{
+    if(i < 0 || i > 1)
+        return;
+    br[i] = {src, dst, amt};
+    memset(bri_t, 0, sizeof(bri_t));
+    for(const Bridge& b : br)
+        if(Ok(b.src, b.dst) && b.src != b.dst)
+            bri_t[b.src][b.dst] += b.amt;
+}
+
+float CableCmd(int src, int dst)
+{
+    return Ok(src, dst) ? v[src].cab_t[dst] + bri_t[src][dst] : 0.0f;
+}
+
+float CableEff(int src, int dst)
+{
+    return Ok(src, dst) ? v[src].cab[dst] + bri[src][dst] : 0.0f;
 }
 
 void SetPitch(int i, float hz, bool snap)
@@ -342,6 +440,16 @@ float Level()
         if(v[i].amp > m)
             m = v[i].amp;
     return m;
+}
+
+int  hold_mask = 3;
+void SetHoldMask(int mask) { hold_mask = mask; }
+void SetPadHeld(int v, bool on) { pad_held[v] = on; }
+bool HoldSustains(int v)
+{
+    // 0.02 is -34 dB, picked as where a tail stops reading as a note
+    return !pad_held[v] && ((hold_mask >> (v / wfc::kGroupSize)) & 1)
+           && wfc::K().hold > 0.0f && Amp(v) > 0.02f;
 }
 
 void Control(float now, float dt)
@@ -383,12 +491,20 @@ void Control(float now, float dt)
         // The envelope, which follows the Delay knob: long echoes get a long
         // release so the loop is still fed while it rings
         {
-            const float tgt = on ? 1.0f : 0.0f;
+            const float tgt = on && pad_held[i] ? 1.0f : 0.0f;
             const float tau = tgt > vo.amp ? (atk / 3.0f > 0.005f ? atk / 3.0f
                                                                  : 0.005f)
                                            : (rel / 3.0f > 0.03f ? rel / 3.0f
                                                                  : 0.03f);
-            Approach(vo.amp, tgt, Coeff(tau, dt));
+            // Exponential, 1x to 60x: the useful range is a ratio (a tail to a
+            // minute-plus drone), not seconds; a pot rarely reaches 1.0 so the
+            // top 3% is true sustain. 60x is reasoned, not measured.
+            const bool  sel = (hold_mask >> (i / wfc::kGroupSize)) & 1;
+            const float hld = sel ? wfc::K().hold : 0.0f;
+            const bool  rls = tgt < vo.amp;
+            if(!(rls && hld >= 0.97f))
+                Approach(vo.amp, tgt,
+                         Coeff(rls ? tau * powf(60.0f, hld / 0.97f) : tau, dt));
         }
 
         // What the wave has actually delivered to this voice
@@ -407,12 +523,14 @@ void Control(float now, float dt)
             Partial& p = vo.p[k];
             if(now > p.next)
             {
-                p.walk  = Clamp(p.walk + Rnd() * 1.6f, -16.0f, 16.0f);
+                const float mo = M().motion;
+                p.walk  = Clamp(p.walk + Rnd() * M().cents,
+                                -10.0f * M().cents, 10.0f * M().cents);
                 p.det_t = p.det_base + p.walk;
                 p.lvl_t = p.base * (1.0f - 0.51f * Rand());
-                p.det_c = Coeff(2.5f, dt);
-                p.lvl_c = Coeff(1.2f + Rand() * 2.0f, dt);
-                p.next  = now + 0.8f + Rand() * 2.0f;
+                p.det_c = Coeff(2.5f / mo, dt);
+                p.lvl_c = Coeff((1.2f + Rand() * 2.0f) / mo, dt);
+                p.next  = now + (0.8f + Rand() * 2.0f) / mo;
             }
             Approach(p.det, p.det_t, p.det_c);
             Approach(p.lvl, p.lvl_t, p.lvl_c);
@@ -426,7 +544,7 @@ void Control(float now, float dt)
         // A broken delay is no longer in tune with the voice's pitch; an
         // unbroken one is snapped to a whole number of its periods, which is
         // what makes the echoes reinforce instead of smear
-        const float t0 = base * D * (skew ? 1.19f : 1.0f);
+        const float t0 = base * D * M().dly_mul * (skew ? 1.19f : 1.0f);
         float       d  = skew ? t0
                               : floorf(t0 * vo.hz + 0.5f) / vo.hz;
         if(!skew && d * vo.hz < 1.0f)
@@ -436,7 +554,7 @@ void Control(float now, float dt)
 
         vo.dly_t  = dly;
         vo.fb_t   = feff;
-        vo.lcut_t = lcut;
+        vo.lcut_t = lcut * M().damp;
         vo.pre_t  = pre;
         vo.wet_t  = 0.8f * sqrtf(pre) * 0.7f * (1.0f - 0.45f * duck[i]);
         Approach(vo.fresh, 0.0f, co.fresh);
@@ -466,14 +584,17 @@ void Control(float now, float dt)
         Approach(vo.lcut, vo.lcut_t, co.lcut);
         Approach(vo.pre, vo.pre_t, co.pre);
         Approach(vo.wet, vo.wet_t, co.wet);
-        Approach(vo.vca, vo.vca_t, co.vca);
+        Approach(vo.vca, vo.vca_t, Clamp(co.vca * M().atk, 0.0f, 1.0f));
         Approach(vo.vcut, vo.vcut_t, co.vcut);
         Approach(vo.mspeed, vo.mspeed_t, co.mod_speed);
         Approach(vo.m_dly, vo.m_dly_t, co.mod_depth);
         Approach(vo.m_fb, vo.m_fb_t, co.mod_depth);
         Approach(vo.m_pre, vo.m_pre_t, co.mod_depth);
         for(int j = 0; j < wfc::kVoices; j++)
+        {
             Approach(vo.cab[j], vo.cab_t[j], co.cab);
+            Approach(bri[i][j], bri_t[i][j], co.cab);
+        }
 
         // THE MODULATOR. The voice follows its own loop: rising or falling,
         // not loud or quiet, because the difference of two envelopes is
@@ -561,7 +682,16 @@ void Process(float* out_l, float* out_r, int n, const float* in,
                 src += SinQ(vo.p[k].phase) * vo.p[k].lvl;
                 vo.p[k].phase += vo.p[k].inc;
             }
-            src *= 0.3f;
+            src *= 0.3f * M().tone;
+            // The material. Noise here rather than after the filter, so the
+            // voice filter and the tuned loop both get to shape it.
+            if(M().noise != 0.0f)
+                src += Rnd() * M().noise;
+            // Drive AHEAD of the line, which is a different animal from the
+            // drive inside the loop: it dirties the source, not the echoes.
+            if(M().drive != 0.0f)
+                src = Shape(src * (1.0f + 8.0f * M().drive));
+            src *= M().out;
             // The partials keep running underneath so the fade back is in
             // phase; at in_mix 1 none of them reaches anything
             if(in)
@@ -577,7 +707,10 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             float fed = 0.0f, dmod = 0.0f, fmod = 0.0f;
             for(int j = 0; j < wfc::kVoices; j++)
             {
-                if(j == i || v[j].cab[i] == 0.0f)
+                if(j == i)
+                    continue;
+                fed += prev[j] * bri[j][i];
+                if(v[j].cab[i] == 0.0f)
                     continue;
                 const float c = prev[j] * v[j].cab[i];
                 if(cable_mode == kCableMod)

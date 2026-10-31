@@ -1,6 +1,6 @@
 // THE INSTRUMENT
 //
-// Pads, latch, octave, voice allocation, the six knobs, and the master chain.
+// Pads, octave, voice allocation, the six knobs, and the master chain.
 // Portable: the Daisy shell (main.cpp) and the desktop shell (host/) both
 // drive this and add nothing of their own.
 
@@ -11,18 +11,22 @@
 namespace synth
 {
 constexpr int kPads = wfc::kPads;   // 7 playable
+constexpr int kConnectorPad = 2;   // momentary, no voice
 
 void Init(float sample_rate, int block_size);
 
-// Pads 0..6. A press re-rolls its voice; nothing sounds unless held or latched
+// Pads 0..6. A press re-rolls its voice; nothing sounds unless held
 void Press(int pad);
 void Release(int pad);
 bool PadOn(int pad);
+bool Joined();   // P05 is down
+// 0 charge: the groups' rules pay for each other's load. 1 freeze: the solver
+// stops while P05 is down and the release repairs. Host-only for now.
+void SetConnectorMode(int m);
+int  ConnectorMode();
 
-// On: latches every pad held right now, on top of any already latched.
-// Off: drops them all.
-void Latch(bool on);
-bool Latched();
+// Which group S07/S08 sends HOLD to: +1 left (up), 0 both, -1 right (down)
+void SetHoldTarget(int pos);
 
 // Clamped to +-2 octaves. True when it moved.
 bool ShiftOctave(int delta);
@@ -68,6 +72,7 @@ bool Frozen();
 
 // Which voice each pad is driving, -1 for none (for the display)
 int PadVoice(int pad);
+// Meaningless for kConnectorPad: it drives no voice
 float PadHz(int pad);
 
 }  // namespace synth

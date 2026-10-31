@@ -14,16 +14,23 @@ namespace
 {
 constexpr int kBlock = 48;
 
+
 DaisySeed hw;
 float     now_s     = 0.0f;
 float     block_dt  = 0.0f;
 uint32_t  blink_until = 0;
 
+// The callback counts blocks; the main loop runs that many Control passes.
+// Control is where the solver lives and a solve is most of a 1 ms block, so
+// it cannot be in the callback -- but it still has to advance once per block
+// or every smoothing time constant is wrong. Falling behind is caught up.
+volatile uint32_t blocks_done = 0;
+uint32_t          blocks_seen = 0;
+
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
                    size_t size)
 {
-    now_s += block_dt;
-    synth::Control(now_s);
+    blocks_done++;
 
     // ponytail: input mode is off while the synth side is being tuned. The
     // engine path and its tests are intact -- put `mono` back to re-enable.
@@ -65,29 +72,40 @@ int main()
         FPU->FPDSCR |= (1u << 24);
     }
 
-    panel::Init(hw);
+    panel::Init(hw, hw.AudioCallbackRate() / (float)panel::kPollDiv);
     hw.StartAudio(AudioCallback);
 
     while(1)
     {
-        // The pads are an I2C transaction, so they are polled far more often
-        // than anything else in here
-        for(int i = 0; i < 500; i++)
+        // The audio callback is the only accurate clock here, so everything
+        // below is paced by it rather than by a counted Delay(1). Falling
+        // behind is caught up; the rates stay right either way.
+        while(blocks_seen != blocks_done)
         {
-            panel::PollPads();
-            panel::Poll();
+            blocks_seen++;
+            now_s += block_dt;
+
+            // The panel runs at a quarter of the block rate, and the two
+            // halves of it land on different blocks so the work is spread
+            // rather than bunched. Control cannot move: it is the per-block
+            // smoothing and has to advance once per block.
+            if((blocks_seen % panel::kPollDiv) == 0)
+                panel::PollPads();
+            else if((blocks_seen % panel::kPollDiv) == 2)
+                panel::Poll();
+            synth::Control(now_s);
 
             const uint32_t now = System::GetNow();
             if(const int b = panel::TakeBlink())
                 blink_until = now + (b == 2 ? 600 : 150);
 
-            // On with the pads, fading off with the release
+            // On with the pads, fading off with the release. One block is a
+            // millisecond, so this is an 8 ms PWM period
             float lv = synth::Level();
             if(now < blink_until)
                 lv = 1.0f - lv;
             const int duty = (int)(lv * 8.0f + 0.5f);
-            hw.SetLed((i & 7) < duty);
-            System::Delay(1);
+            hw.SetLed((int)(blocks_seen & 7) < duty);
         }
     }
 }

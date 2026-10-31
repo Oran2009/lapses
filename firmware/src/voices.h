@@ -41,6 +41,20 @@ enum CableMode
     kCableCount
 };
 void SetCableMode(int m);
+
+// SPIKE: three voice baselines to choose between by ear. GUI only -- the
+// Touch 2 does not map this. 0 is the voice as it was.
+constexpr int kModels = 3;
+void        SetModel(int m);
+int         Model_();
+const char* ModelName(int m);
+// Two fixed cables held outside the solver, added to a voice's own cable.
+// They carry feed in every cable mode; src < 0 clears one.
+void  SetBridge(int i, int src, int dst, float amt);
+// Commanded: what was just asked for, before the glide. Not what is heard.
+float CableCmd(int src, int dst);
+// Smoothed: what the audio is using now. Draw this one.
+float CableEff(int src, int dst);
 int  CableMode_();
 const char* CableName(int m);
 
@@ -55,6 +69,15 @@ float Pitch(int v);
 // the amp envelopes, the partial wander and the mods, and moves every
 // smoothed parameter towards what the shown WFC state and the knobs ask for.
 void Control(float now, float dt);
+
+// Bit g set: HOLD (wfc::K().hold) lengthens the release of group g's voices
+void SetHoldMask(int mask);
+
+// The pad's own state, apart from wfc::Sounding: a voice HOLD keeps sounding
+// is still released as far as the envelope is concerned. Defaults to true.
+void SetPadHeld(int v, bool on);
+// Released but HOLD is keeping it audible, so the solver must still count it
+bool HoldSustains(int v);
 
 // One block of audio. Adds into out_l/out_r, which must already be the dry
 // bus the caller wants (normally silence).

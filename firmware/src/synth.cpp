@@ -15,36 +15,23 @@ namespace synth
 {
 namespace
 {
-// Major, 5-limit. Scale and root are fixed (HANDOFF 4.1).
-const int kRatN[kPads] = {1, 9, 5, 4, 3, 5, 15};
-const int kRatD[kPads] = {1, 8, 4, 3, 2, 3, 8};
+// Two just triads a fifth apart (1, 6/5, 3/2 and 3/2, 9/5, 9/4). Index 2 is
+// the connector and never read for pitch.
+const int kRatN[kPads] = {1, 6, 0, 3, 9, 3, 9};
+const int kRatD[kPads] = {1, 5, 1, 2, 5, 2, 4};
 constexpr int kRoot = 9;   // A
 
-bool  held[kPads], latched[kPads];
+bool  held[kPads];
 // The octave a pad was pressed at. A pad keeps the pitch it was triggered
 // with until it is released, so shifting the octave leaves what is sounding
-// alone and only applies to the next press. A reclaim after a steal re-uses
-// this too, or a latched drone would jump octave when its spot came back.
+// alone and only applies to the next press.
 float pad_hz[kPads];
-int   pad_voice[kPads], voice_pad[wfc::kVoices];
+const int kPadVoice[kPads] = {0, 1, -1, 3, 4, 2, 5};
 int   octave    = 0;
 int   gain_step = -4;   // -12 dB, safe for headphones
 float gain_lin  = 1.0f;
 float sr        = 48000.0f;
 int   block     = 48;
-
-// +-12 semitones from the knob, centred at concert pitch. Continuous and
-// live: unlike the octave buttons, this one does move what is sounding, which
-// is the point -- slowly detuning a held drone is the gesture worth having.
-float TuneRatio()
-{
-    const float t = wfc::K().tune - 0.5f;
-    // A detent at the centre: over two octaves a knob never lands exactly on
-    // concert pitch, and that is the one position worth being able to find
-    if(t > -0.01f && t < 0.01f)
-        return 1.0f;
-    return powf(2.0f, t * 2.0f);
-}
 
 float RootHz()
 {
@@ -135,92 +122,57 @@ float Limit(float x)
     return y > 1.0f ? 1.0f : (y < -1.0f ? -1.0f : y);
 }
 
-bool PadActive(int p) { return held[p] || latched[p]; }
+float now_s = 0.0f;
 
-bool VoiceLive(int v)
+// Measured: about +5 dB over a 2 s hold, saturating; below ~0.9 nothing happens
+constexpr float kFreezeBridge = 2.2f;
+
+int  connector_mode = 0;
+bool user_freeze    = false;
+bool conn_frozen    = false;
+
+void UpdateBridges()
 {
-    const int p = voice_pad[v];
-    return p >= 0 && PadActive(p) && pad_voice[p] == v;
-}
-
-// The pad's own voice if it still sounds, else the quietest free one, else
-// steal the oldest and take its pad away from it
-int Allocate(int pad, float now)
-{
-    const int cur = pad_voice[pad];
-    if(cur >= 0 && VoiceLive(cur))
-        return cur;
-
-    int   best = -1;
-    float lo   = 2.0f;
-    for(int v = 0; v < wfc::kVoices; v++)
-        if(!VoiceLive(v) && voices::Amp(v) < lo)
-        {
-            lo   = voices::Amp(v);
-            best = v;
-        }
-    if(best >= 0)
-        return best;
-
-    // Take a parked pad's voice before a held one's: a finger on a pad
-    // outranks one that was latched and left
-    int oldest = -1;
-    for(int pass = 0; pass < 2 && oldest < 0; pass++)
-        for(int v = 0; v < wfc::kVoices; v++)
-        {
-            const int p = voice_pad[v];
-            if(pass == 0 && !(p >= 0 && latched[p] && !held[p]))
-                continue;
-            if(oldest < 0 || wfc::StartedAt(v) < wfc::StartedAt(oldest))
-                oldest = v;
-        }
-    // It keeps its latch, so it takes a voice back once one frees up
-    if(voice_pad[oldest] >= 0)
-        pad_voice[voice_pad[oldest]] = -1;
-    (void)now;
-    return oldest;
+    int a[wfc::kGroups];
+    for(int g = 0; g < wfc::kGroups; g++)
+    {
+        a[g] = -1;
+        for(int v = g * wfc::kGroupSize; v < (g + 1) * wfc::kGroupSize; v++)
+            if(wfc::Sounding(v) && (a[g] < 0 || wfc::StartedAt(v) > wfc::StartedAt(a[g])))
+                a[g] = v;
+    }
+    const bool down   = held[kConnectorPad];
+    const bool freeze = down && connector_mode == 1;
+    wfc::SetJoined(down && connector_mode == 0, now_s);
+    if(freeze != conn_frozen)
+    {
+        conn_frozen = freeze;
+        wfc::SetFrozen(user_freeze || freeze);
+        // Nothing else would start the repair that tucks the swell back in
+        // Not under the panel freeze: Heal rewrites tiles whatever the flag says
+        if(!freeze && !user_freeze)
+            wfc::Heal(now_s);
+    }
+    const bool on = held[kConnectorPad] && a[0] >= 0 && a[1] >= 0;
+    const float amt = connector_mode == 1 ? kFreezeBridge : wfc::AMT[1];
+    voices::SetBridge(0, on ? a[0] : -1, on ? a[1] : -1, amt);
+    voices::SetBridge(1, on ? a[1] : -1, on ? a[0] : -1, amt);
 }
 
 // Pushes every pad's sounding state into WFC, which is what the rules read
 void SyncSounding(float now)
 {
-    for(int v = 0; v < wfc::kVoices; v++)
+    for(int p = 0; p < kPads; p++)
     {
-        const bool on = VoiceLive(v);
+        const int v = kPadVoice[p];
+        if(v < 0)
+            continue;
+        voices::SetPadHeld(v, held[p]);
+        const bool on = held[p] || voices::HoldSustains(v);
         if(on != wfc::Sounding(v))
             wfc::SetSounding(v, on, now);
     }
 }
-
-// Hands `pad` voice `v`, re-rolling it
-void Give(int pad, int v, float now)
-{
-    pad_voice[pad] = v;
-    voice_pad[v]   = pad;
-    voices::SetPitch(v, PadHz(pad), true);
-    wfc::SetSounding(v, true, now);
-    SyncSounding(now);
-    wfc::Pass(v, now);
-}
-
-// An active pad that lost its voice to a steal takes a free one back, so
-// releasing a borrowed pad hands the latched ones their voices again
-void Reclaim(float now)
-{
-    for(int p = 0; p < kPads; p++)
-    {
-        if(!PadActive(p) || pad_voice[p] >= 0)
-            continue;
-        for(int v = 0; v < wfc::kVoices; v++)
-            if(!VoiceLive(v))
-            {
-                Give(p, v, now);
-                break;
-            }
-    }
-}
-
-float now_s = 0.0f;
 
 }  // namespace
 
@@ -228,7 +180,7 @@ const char* KnobName(int i)
 {
     static const char* n[kKnobs]
         = {"Delay",  "Feedback", "Distortion", "Filter",
-           "Mod",    "Control",  "Unrest",     "Tune"};
+           "Mod",    "Control",  "Unrest",     "Hold"};
     return i >= 0 && i < kKnobs ? n[i] : "?";
 }
 
@@ -238,13 +190,15 @@ void Init(float sample_rate, int block_size)
     block = block_size;
     for(int p = 0; p < kPads; p++)
     {
-        held[p] = latched[p] = false;
-        pad_voice[p]         = -1;
-        pad_hz[p]            = 0.0f;
+        held[p]   = false;
+        pad_hz[p] = 0.0f;
     }
-    for(int v = 0; v < wfc::kVoices; v++)
-        voice_pad[v] = -1;
-    octave = 0;
+    octave         = 0;
+    connector_mode = 0;
+    voices::SetHoldMask(3);
+    wfc::K().hold = 0.0f;
+    now_s          = 0.0f;
+    user_freeze = conn_frozen = false;
     ShiftGain(0);
 
     memset(comb_buf, 0, sizeof(comb_buf));
@@ -265,22 +219,21 @@ void Init(float sample_rate, int block_size)
 
 float PadHz(int p)
 {
-    // pad_hz holds the pitch the pad was pressed at, before Tune, so Tune
-    // keeps applying to it while it sounds
-    if(PadActive(p) && pad_hz[p] > 0.0f)
-        return pad_hz[p] * TuneRatio();
-    return RootHz() * (float)kRatN[p] / (float)kRatD[p] * TuneRatio();
+    if(held[p] && pad_hz[p] > 0.0f)
+        return pad_hz[p];
+    return RootHz() * (float)kRatN[p] / (float)kRatD[p];
 }
 
-int  PadVoice(int p) { return pad_voice[p]; }
-bool PadOn(int p) { return PadActive(p); }
-bool Latched()
+int  PadVoice(int p) { return kPadVoice[p]; }
+bool PadOn(int p) { return held[p]; }
+bool Joined() { return held[kConnectorPad]; }
+
+void SetConnectorMode(int m)
 {
-    for(int p = 0; p < kPads; p++)
-        if(latched[p])
-            return true;
-    return false;
+    connector_mode = m == 1 ? 1 : 0;
+    UpdateBridges();
 }
+int ConnectorMode() { return connector_mode; }
 
 void Press(int pad)
 {
@@ -288,27 +241,24 @@ void Press(int pad)
         return;
     held[pad]   = true;
     pad_hz[pad] = RootHz() * (float)kRatN[pad] / (float)kRatD[pad];
-    Give(pad, Allocate(pad, now_s), now_s);
+    const int v = kPadVoice[pad];
+    if(v < 0)
+    {
+        UpdateBridges();
+        return;
+    }
+    voices::SetPitch(v, PadHz(pad), true);
+    wfc::SetSounding(v, true, now_s);
+    SyncSounding(now_s);
+    wfc::Pass(v, now_s);
+    UpdateBridges();
 }
 
 void Release(int pad)
 {
     held[pad] = false;
-    if(!latched[pad])
-        pad_voice[pad] = -1;
     SyncSounding(now_s);
-    Reclaim(now_s);
-}
-
-void Latch(bool on)
-{
-    for(int p = 0; p < kPads; p++)
-        latched[p] = on ? (latched[p] || held[p]) : false;
-    for(int p = 0; p < kPads; p++)
-        if(!PadActive(p))
-            pad_voice[p] = -1;
-    SyncSounding(now_s);
-    Reclaim(now_s);
+    UpdateBridges();
 }
 
 bool ShiftOctave(int delta)
@@ -348,11 +298,6 @@ void SetKnob(int i, float val)
     if(i < 0 || i >= kKnobs || fabsf(k[i] - val) < 0.004f)
         return;
     k[i] = val;
-    // Tune is global and live, so everything sounding follows it, gliding
-    if(i == 7)
-        for(int p = 0; p < kPads; p++)
-            if(PadActive(p) && pad_voice[p] >= 0)
-                voices::SetPitch(pad_voice[p], PadHz(p), false);
     // Only four of the eight reach the rules, and the rebuild is 10,000
     // tile pairs
     if(i == 0 || i == 1 || i == 2 || i == 5)
@@ -362,10 +307,33 @@ void SetKnob(int i, float val)
 
 float Knob(int i) { return (&wfc::K().delay)[i]; }
 
+// Nothing sounding is the normal state of this instrument between phrases,
+// and rendering four silent voices and a silent plate costs the same as
+// rendering four loud ones. The burst of work every block couples into the
+// analog side as a tone at the block rate, which is audible with the mixer
+// up, so once everything really has gone quiet the chain stops running.
+// The threshold is well under the reverb's own tail, and anything the player
+// does clears the counter, so the first block after a touch renders in full.
+constexpr float kIdleFloor  = 1.0e-5f;   // -100 dBFS
+constexpr float kIdleHold_s = 8.0f;      // longer than the plate's 5 s tail
+int             idle_blocks = 0;
+bool            idle        = false;
+
 void Control(float now)
 {
     now_s = now;
+    // Only a sounding pad can break the silence, so this is the one place
+    // that has to wake the chain
+    for(int p = 0; p < kPads; p++)
+        if(held[p])
+        {
+            idle_blocks = 0;
+            idle        = false;
+            break;
+        }
+    SyncSounding(now);
     wfc::Tick(now);
+    UpdateBridges();
     voices::Control(now, (float)block / sr);
 }
 
@@ -373,6 +341,14 @@ float InputMix() { return in_mix; }
 
 void Process(float* l, float* r, int n, const float* in)
 {
+    // Still asleep: the buffers the caller gets are the silence it asked for
+    if(idle && !in)
+    {
+        for(int i = 0; i < n; i++)
+            l[i] = r[i] = 0.0f;
+        return;
+    }
+
     if(in)
     {
         float peak = 0.0f;
@@ -397,8 +373,7 @@ void Process(float* l, float* r, int n, const float* in)
     if(in)
         for(int i = 0; i < n; i++)
             l[i] += in[i] * in_mix * 0.5f, r[i] += in[i] * in_mix * 0.5f;
-    // Fixed, now that S35 is Tune: a reverb balance is set once and left, and
-    // the knob was worth more as the thing that lets this tune to other gear.
+    // Fixed, not a knob: a reverb balance is set once and left.
     // 1.8 per unit is measured, not derived -- fully wet matches fully dry in
     // level, where 2.2 put bursts of samples on the ceiling and the master
     // limiter's 26 ms release pumped on every one of them.
@@ -415,6 +390,20 @@ void Process(float* l, float* r, int n, const float* in)
         r[i] = Limit((sr_ * dry + Verb(1, (sr_ - send_hp[1]) * send) * 0.7f)
                      * gain_lin);
     }
+
+    float peak = 0.0f;
+    for(int i = 0; i < n; i++)
+    {
+        const float a = fabsf(l[i]), b = fabsf(r[i]);
+        if(a > peak)
+            peak = a;
+        if(b > peak)
+            peak = b;
+    }
+    if(peak > kIdleFloor)
+        idle_blocks = 0;
+    else if(++idle_blocks > (int)(kIdleHold_s * sr / (float)n))
+        idle = true;
 }
 
 void SetCableMode(int m)
@@ -432,7 +421,12 @@ const char* CableName(int m) { return voices::CableName(m); }
 
 void Break() { wfc::BreakRule(-1, 0.0f, now_s); }
 void Settle() { wfc::Heal(now_s); }
-void Freeze(bool on) { wfc::SetFrozen(on); }
+void SetHoldTarget(int pos) { voices::SetHoldMask(pos > 0 ? 1 : pos < 0 ? 2 : 3); }
+void Freeze(bool on)
+{
+    user_freeze = on;
+    wfc::SetFrozen(on || conn_frozen);
+}
 bool Frozen() { return wfc::Frozen(); }
 
 float Level() { return voices::Level(); }

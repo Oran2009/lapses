@@ -27,7 +27,7 @@ int      blink     = 0;
 
 }  // namespace
 
-bool Init(DaisySeed& hw)
+bool Init(DaisySeed& hw, float poll_rate)
 {
     AdcChannelConfig cfg[kAnalog];
     cfg[0].InitSingle(seed::A0);
@@ -40,7 +40,7 @@ bool Init(DaisySeed& hw)
     cfg[7].InitSingle(seed::A7);
     hw.adc.Init(cfg, kAnalog);
     for(int i = 0; i < kAnalog; i++)
-        analog[i].Init(hw.adc.GetPtr(i), hw.AudioCallbackRate());
+        analog[i].Init(hw.adc.GetPtr(i), poll_rate);
     hw.adc.Start();
 
     switch_a.Init(seed::D7, seed::D6);
@@ -91,21 +91,15 @@ void Poll()
 {
     for(int i = 0; i < kAnalog; i++)
         analog[i].Process();
-    // S30..S35 then the two faders, against the engine's knob order
-    static const int kKnobOf[kAnalog] = {4, 2, 1, 0, 3, 7, 6, 5};
+    // S30 Mod, S31 Feedback, S32 Delay, S33 Distortion, S34 Filter,
+    // S35 Hold, then the faders S36 Unrest and S37 Control
+    static const int kKnobOf[kAnalog] = {4, 1, 0, 2, 3, 7, 6, 5};
     for(int i = 0; i < kAnalog; i++)
         synth::SetKnob(kKnobOf[i], analog[i].Value());
 
-    // S07/S08 held down latches, and keeps latching, so a pad pressed while
-    // it is down joins the others. Centre drops the lot.
-    const int   a        = switch_a.Read();
-    const bool  sw_down  = a == Switch3::POS_DOWN;
-    static bool was_down = false;
-    if(sw_down || was_down)
-        synth::Latch(sw_down);
-    was_down = sw_down;
-    // Up holds the solver: down latches the pads, up latches the state
-    synth::Freeze(a == Switch3::POS_UP);
+    // S07/S08 aims HOLD: up left group, centre both, down right
+    const int a = switch_a.Read();
+    synth::SetHoldTarget(a == Switch3::POS_UP ? 1 : a == Switch3::POS_DOWN ? -1 : 0);
 
     // S09/S10 picks what a cable carries. Centre is none at all, up is
     // cross-modulation, down is cross-feed; the two live positions also turn

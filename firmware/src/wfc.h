@@ -16,7 +16,10 @@
 
 namespace wfc
 {
-constexpr int kVoices = 4;
+constexpr int kVoices    = 6;
+constexpr int kGroups    = 2;
+constexpr int kGroupSize = kVoices / kGroups;
+inline int    GroupOf(int v) { return v / kGroupSize; }
 constexpr int kPads   = 7;
 
 // Delay time classes, as multiples of the base time
@@ -53,7 +56,7 @@ inline int ModDepthOf(int o) { return o % 4; }
 // The six knobs, each 0..1 (4.2)
 struct Knobs
 {
-    float delay, fb, drive, filter, mod, safe, unrest, tune;
+    float delay, fb, drive, filter, mod, safe, unrest, hold;
 };
 
 // What the rules allow at the current strictness (4.4)
@@ -92,6 +95,7 @@ const char* BreakName(BreakType t);
 Knobs&      K();
 // Recomputes the rule tables. Call after any knob move.
 void        RebuildRules();
+
 const Limits& Lim();
 
 float DelayBase();
@@ -101,6 +105,8 @@ float ReleaseT();
 float AttackT();
 float ModSpeed0();
 float FbMul();
+// How far the join inflates the feedback the rules read (not the audio's)
+float ChargeMul();
 float DrvMul();
 float ModMul();
 float LoopCut();
@@ -131,6 +137,8 @@ void Init(uint32_t seed);
 // The host owns the pads and the latch; WFC only needs to know which voices
 // are sounding and when each started, so it can order the repair wave.
 void  SetSounding(int v, bool on, float now);
+// While joined each group's rules are charged the louder group's load
+void  SetJoined(bool on, float now);
 bool  Sounding(int v);
 // When this voice last started, for the wave order and for voice stealing
 float StartedAt(int v);
@@ -159,8 +167,10 @@ void Pass(int v, float now);
 // Repair with nothing pinned: after a knob move, a strictness change, or a
 // scheduled return from a break
 void Heal(float now);
+void Heal(int group, float now);
 // Let one rule go. type < 0 picks at random. (4.6)
 void BreakRule(int type, float offset, float now);
+void BreakRule(int type, int group, float offset, float now);
 // A knob moved: the rules change now, the repair comes 350 ms after the last
 // movement, so the player hears the strain first.
 void KnobsMoved(float now);
@@ -168,8 +178,12 @@ void KnobsMoved(float now);
 // Deliver any events that are due, and run the heal/lapse/unrest timers.
 void Tick(float now);
 
+// Events that found the queue full since Init; nonzero means shown_* is stale.
+int EventsDropped();
+
 // Which rules are broken right now, reading the SHOWN state. Returns the
-// count; `out` must hold at least kVoices * kVoices + kVoices entries.
-int  Diagnose(Violation* out, int max);
+// count; `out` must hold at least kVoices * kVoices + kVoices entries. Each
+// group is judged with its own charge; group >= 0 judges only that one.
+int  Diagnose(Violation* out, int max, int group = -1);
 
 }  // namespace wfc

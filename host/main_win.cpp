@@ -5,11 +5,11 @@
 // comes with the compiler is the whole dependency list.
 //
 //   pads     A S D F G H J   (or 1..7)
-//   switches click them, or space (latch), C (freeze), M (mod mode)
+//   switches click them, or C (freeze, no hardware switch), M (mod mode)
 //   octave   Z / X
 //   volume   - / =
 //   knobs    drag with the mouse, or F1..F6 then arrow keys
-//   break    B,   settle  N,   freeze  C,   cables  M
+//   break    B,   settle  N,   freeze  C,   cables  M,   P05 mode  J
 //   panic    escape
 
 #include "synth.h"
@@ -255,50 +255,108 @@ struct Rect
     int x, y, w, h;
 };
 Rect knob_r[synth::kKnobs], pad_r[synth::kPads];
-// The two panel switches, drawn and clicked as three stacked cells each, so
-// they behave the way the Touch 2's do rather than as keyboard toggles.
-// -1 down, 0 centre, +1 up.
-constexpr int kSwitches = 2;
-Rect sw_r[kSwitches][3];
-int  sw_pos[kSwitches] = {0, 0};
+bool knob_vert[synth::kKnobs];
+// Panel pads with no voice: P00 oct down, P01 unmapped, P02 oct up, P10 vol
+// down, P11 vol up. Same order everywhere below.
+Rect xp_r[5];
+bool xp_on[5];
+int  mouse_xp = -1;
+const char* kXpName[5] = {"P00", "P01", "P02", "P10", "P11"};
+const char* kXpFn[5]   = {"oct -", "unmapped", "oct +", "vol -", "vol +"};
+const char  kXpKey[5]  = {'Z', 0, 'X', '-', '='};
+// Engine knob index -> the panel's name, so the window reads like the board
+const char* kKnobLabel[synth::kKnobs]
+    = {"S32 delay", "S31 feedback", "S33 distortion", "S34 filter",
+       "S30 mod",   "S37 control",  "S36 unrest",     "S35 HOLD"};
 
-const char* kSwLabel[kSwitches][3]
-    = {{"freeze", "--", "latch"},
-       {"cross-mod", "no cables", "cross-feed"}};
-const char* kSwName[kSwitches] = {"S07/S08", "S09/S10"};
+// Panel replica on the left, cards and GUI-only controls to its right
+constexpr int kPx = 16, kPy = 16, kPW = 540, kPH = 908;
+constexpr int kRx = kPx + kPW + 24;
+constexpr int kGuiY = 350;
+constexpr int kSwW = 140;
+// The panel switches, drawn and clicked as stacked cells, so they behave the
+// way the Touch 2's do rather than as keyboard toggles. Cell 0 is the top.
+// Pos() gives the -1 down / 0 centre / +1 up the engine expects, for the two
+// hardware switches. The third is the voice-model spike and exists only here.
+constexpr int kSwitches   = 5;
+constexpr int kSwMaxCells = voices::kModels;
+const int     kSwCells[kSwitches] = {3, 3, voices::kModels, 2, 2};
+Rect          sw_r[kSwitches][kSwMaxCells];
+int           sw_cell[kSwitches] = {1, 1, 0, 0, 0};
 
-// Exactly what panel::Poll does with them, so there is one behaviour and not
-// two. Latch is re-asserted while the switch is down, which is what lets a pad
-// pressed mid-hold join the ones already latched.
-void ApplySwitches()
+inline int Pos(int k) { return 1 - sw_cell[k]; }
+
+const char* kSwLabel[kSwitches][kSwMaxCells]
+    = {{"hold left", "hold both", "hold right"},
+       {"cross-mod", "no cables", "cross-feed"},
+       {},
+       {"charge", "freeze"},
+       {"live", "freeze"}};
+const char* kSwName[kSwitches] = {"S07/S08 HOLD", "S09/S10 cables",
+                                  "voice model (V)", "P05 mode (J)",
+                                  "freeze (C)"};
+
+// The model cells are named by the engine, so there is one list and not two
+const char* SwLabel(int k, int c)
 {
-    static bool was_down = false;
-    const bool  down     = sw_pos[0] < 0;
-    if(down || was_down)
-        synth::Latch(down);
-    was_down = down;
-    synth::Freeze(sw_pos[0] > 0);
-    synth::SetCableMode(sw_pos[1] > 0   ? voices::kCableMod
-                        : sw_pos[1] < 0 ? voices::kCableFeed
-                                        : voices::kCableOff);
+    return k == 2 ? voices::ModelName(c) : kSwLabel[k][c];
 }
 
-void Layout(int W, int H)
-{
-    const int m = 16;
-    const int kw = (W - m * (synth::kKnobs + 1)) / synth::kKnobs;
-    for(int i = 0; i < synth::kKnobs; i++)
-        knob_r[i] = {m + i * (kw + m), H - 140, kw, 54};
-    // Between the voice cards and the knobs
-    const int sy = 240, sh = 22, sw_w = 108;
-    for(int k = 0; k < kSwitches; k++)
-        for(int c = 0; c < 3; c++)
-            sw_r[k][c] = {m + k * (sw_w + m * 3), sy + 16 + c * sh,
-                          k == 2 ? sw_w + 24 : sw_w, sh};
+// Exactly what panel::Poll does with them, so there is one behaviour and not
+// two. Freeze has no hardware switch; it is the fifth cell group here.
 
-    const int pw = (W - m * 8) / 7;
+void ApplySwitches()
+{
+    synth::SetHoldTarget(Pos(0));
+    synth::Freeze(sw_cell[4]);
+    synth::SetCableMode(Pos(1) > 0   ? voices::kCableMod
+                        : Pos(1) < 0 ? voices::kCableFeed
+                                     : voices::kCableOff);
+    voices::SetModel(sw_cell[2]);
+    synth::SetConnectorMode(sw_cell[3]);
+}
+
+void Layout()
+{
+    auto X = [](float f) { return kPx + (int)(kPW * f); };
+    auto Y = [](float f) { return kPy + (int)(kPH * f); };
+    struct Spot { int k; float fx, fy; };
+    static const Spot knobs[] = {{1, .2f, .35f}, {0, .4f, .35f}, {2, .6f, .35f},
+                                 {3, .8f, .35f}, {4, .2f, .48f}, {7, .8f, .48f}};
+    for(const Spot& sp : knobs)
+    {
+        knob_r[sp.k]    = {X(sp.fx) - 50, Y(sp.fy) - 46, 100, 96};
+        knob_vert[sp.k] = false;
+    }
+    const int fh = Y(.54f) - Y(.29f);
+    knob_r[6] = {X(.06f) - 18, Y(.29f), 36, fh};
+    knob_r[5] = {X(.94f) - 18, Y(.29f), 36, fh};
+    knob_vert[5] = knob_vert[6] = true;
+
+    // Engine pad order is P03 P04 P05 P06 P07 P08 P09
+    static const float pf[synth::kPads][2] = {{.10f, .83f}, {.30f, .80f},
+                                              {.50f, .80f}, {.70f, .80f},
+                                              {.90f, .83f}, {.38f, .925f},
+                                              {.62f, .925f}};
     for(int i = 0; i < synth::kPads; i++)
-        pad_r[i] = {m + i * (pw + m), H - 80, pw, 64};
+        pad_r[i] = {X(pf[i][0]) - 43, Y(pf[i][1]) - 32, 86, 64};
+    static const float xf[5][2] = {{.30f, .585f}, {.50f, .585f}, {.70f, .585f},
+                                   {.38f, .045f}, {.62f, .045f}};
+    for(int i = 0; i < 5; i++)
+        xp_r[i] = i < 3 ? Rect{X(xf[i][0]) - 43, Y(xf[i][1]) - 32, 86, 64}
+                        : Rect{X(xf[i][0]) - 54, Y(xf[i][1]) - 22, 108, 44};
+
+    // Both switches sit in the gap under pad row A; S07/S08 is the lower
+    const int base = Y(.585f) + 50;
+    for(int c = 0; c < 3; c++)
+    {
+        sw_r[1][c] = {X(.33f) - kSwW / 2, base + c * 22, kSwW, 22};
+        sw_r[0][c] = {X(.67f) - kSwW / 2, base + 30 + c * 22, kSwW, 22};
+    }
+    for(int k = 2; k < kSwitches; k++)
+        for(int c = 0; c < kSwCells[k]; c++)
+            sw_r[k][c] = {kRx + 16 + (k - 2) * (kSwW + 16),
+                          kGuiY + 52 + c * 22, kSwW, 22};
 }
 
 void Bar(HDC dc, Rect r, float f, COLORREF c)
@@ -347,6 +405,32 @@ void Text(HDC dc, int x, int y, const char* s, COLORREF c)
     TextOutA(dc, x, y, s, (int)strlen(s));
 }
 
+void TextC(HDC dc, int cx, int y, const char* s, COLORREF c)
+{
+    SetTextAlign(dc, TA_CENTER | TA_TOP);
+    Text(dc, cx, y, s, c);
+    SetTextAlign(dc, TA_LEFT | TA_TOP);
+}
+
+void Box(HDC dc, Rect r, COLORREF c)
+{
+    RECT b = {r.x, r.y, r.x + r.w, r.y + r.h};
+    HBRUSH br = CreateSolidBrush(c);
+    FillRect(dc, &b, br);
+    DeleteObject(br);
+}
+
+// The two voice groups read as two families: blue left, green right
+COLORREF Family(int group, bool on)
+{
+    return group ? (on ? RGB(90, 200, 140) : RGB(30, 64, 50))
+                 : (on ? RGB(90, 140, 230) : RGB(30, 44, 76));
+}
+COLORREF FamilyText(int group)
+{
+    return group ? RGB(120, 190, 150) : RGB(130, 160, 220);
+}
+
 void Paint(HWND hw)
 {
     PAINTSTRUCT ps;
@@ -366,7 +450,7 @@ void Paint(HWND hw)
                              CLEARTYPE_QUALITY, 0, "Consolas");
     HFONT of = (HFONT)SelectObject(dc, font);
 
-    Layout(W, H);
+    Layout();
     const COLORREF dim = RGB(120, 126, 140), fgc = RGB(222, 226, 235);
     const COLORREF hot = RGB(226, 96, 84), ok = RGB(110, 190, 150);
 
@@ -388,31 +472,45 @@ void Paint(HWND hw)
             n += snprintf(line + n, sizeof(line) - n, ")");
         }
     }
-    Text(dc, 16, 12, line, nv ? hot : ok);
+    Text(dc, kRx, 12, line, nv ? hot : ok);
 
-    char hdr2[160];
+    char hdr2[160], chg[24] = "";
+    if(wfc::ChargeMul() > 1.0f)
+        snprintf(chg, sizeof(chg), "   CHARGED x%.2f", wfc::ChargeMul());
     snprintf(hdr2, sizeof(hdr2),
              "oct %+d   out %.0f dB   %s   lapse %.2f  "
-             "unrest %.2f/s   cables %s",
+             "unrest %.2f/s   cables %s%s",
              synth::Octave(), synth::GainDb(),
              synth::InputMix() > 0.5f
                      ? "INPUT  "
-                     : (synth::Frozen()
-                            ? "FROZEN "
-                            : (synth::Latched() ? "LATCHED" : "       ")), wfc::LapseChance(),
-             wfc::UnrestRate(), synth::CableName(synth::CableMode()));
-    Text(dc, 16, 30, hdr2, dim);
+                     : (synth::Frozen() ? "FROZEN " : "       "), wfc::LapseChance(),
+             wfc::UnrestRate(), synth::CableName(synth::CableMode()), chg);
+    Text(dc, kRx, 30, hdr2, dim);
 
     // The voice cards, showing the EFFECTIVE values, knob scaling and mod
     // included, because that is what you hear (principle 8)
-    const int cy = 58, ch = 168;
-    const int cw = (W - 16 * 5) / 4;
+    const int ch = 104, gap = 34, cols = wfc::kGroupSize;
+    const int cw = (W - kRx - 16 - 16 * (cols - 1)) / cols;
+    const int lw = 188;   // text column; the bars take the rest of the card
+    auto cardX = [&](int v) { return kRx + (v % cols) * (cw + 16); };
+    auto cardY = [&](int v) { return 74 + wfc::GroupOf(v) * (ch + gap); };
+
+    for(int g = 0; g < wfc::kGroups; g++)
+    {
+        char gl[32];
+        snprintf(gl, sizeof(gl), "%s group", g ? "right" : "left");
+        Text(dc, kRx, cardY(g * cols) - 16, gl, FamilyText(g));
+    }
+
     for(int v = 0; v < wfc::kVoices; v++)
     {
-        const int x = 16 + v * (cw + 16);
+        const int x = cardX(v), cy = cardY(v);
+        const int bx = x + lw, bw = cw - lw - 8;
         RECT      card = {x, cy, x + cw, cy + ch};
-        HBRUSH    cb = CreateSolidBrush(wfc::Sounding(v) ? RGB(38, 42, 52)
-                                                         : RGB(26, 28, 34));
+        const bool rg = wfc::GroupOf(v) != 0;
+        HBRUSH    cb = CreateSolidBrush(
+            wfc::Sounding(v) ? (rg ? RGB(32, 58, 48) : RGB(34, 44, 70))
+                             : (rg ? RGB(22, 32, 28) : RGB(22, 27, 38)));
         FillRect(dc, &card, cb);
         DeleteObject(cb);
 
@@ -436,9 +534,9 @@ void Paint(HWND hw)
         Text(dc, x + 8, cy + 6, s, wfc::Sounding(v) ? fgc : dim);
         if(pad >= 0)
         {
-            snprintf(s, sizeof(s), "%c %.0fHz", (char)kPadKey[pad],
-                     voices::Pitch(v));
-            Text(dc, x + cw - 86, cy + 6, s, ok);
+            snprintf(s, sizeof(s), "P%02d %c %.0fHz", pad + 3,
+                     (char)kPadKey[pad], voices::Pitch(v));
+            Text(dc, bx, cy + 6, s, ok);
         }
 
         snprintf(s, sizeof(s), "dly %4.0f (%.0f)", eD * 1000.0f, D * 1000.0f);
@@ -456,70 +554,167 @@ void Paint(HWND hw)
         snprintf(s, sizeof(s), "mod %+.2f  %.2fHz x%.2f", md,
                  wfc::ModSpeed0() * wfc::MS[wfc::ModSpeedOf(lo)],
                  voices::ModDepth(v));
-        Text(dc, x + 8, cy + 76, s, dim);
-        Centred(dc, {x + 8, cy + 92, cw - 16, 8}, md / 1.5f,
+        Text(dc, x + 8, cy + 74, s, dim);
+        Centred(dc, {x + 8, cy + 90, lw - 16, 8}, md / 1.5f,
                 RGB(150, 130, 200));
 
-        Text(dc, x + 8, cy + 104, "amp", dim);
-        Bar(dc, {x + 42, cy + 106, cw - 50, 8}, voices::Amp(v), ok);
-        Text(dc, x + 8, cy + 118, "out", dim);
-        Bar(dc, {x + 42, cy + 120, cw - 50, 8},
+        Text(dc, bx, cy + 26, "amp", dim);
+        Bar(dc, {bx + 34, cy + 28, bw - 34, 8}, voices::Amp(v), ok);
+        Text(dc, bx, cy + 42, "out", dim);
+        Bar(dc, {bx + 34, cy + 44, bw - 34, 8},
             voices::LoopLevel(v) * 4.0f > 1.0f ? 1.0f
                                               : voices::LoopLevel(v) * 4.0f,
             RGB(96, 118, 170));
-        Text(dc, x + 8, cy + 132, "pan", dim);
-        Centred(dc, {x + 42, cy + 134, cw - 50, 8}, voices::Pan(v),
+        Text(dc, bx, cy + 58, "pan", dim);
+        Centred(dc, {bx + 34, cy + 60, bw - 34, 8}, voices::Pan(v),
                 RGB(130, 170, 200));
 
         const int tgt = wfc::OptTarget(wfc::ShownPatch(v));
         if(tgt >= 0)
         {
-            snprintf(s, sizeof(s), "cable -> voice %d  x%.2f", tgt + 1,
+            snprintf(s, sizeof(s), "cable>v%d x%.2f", tgt + 1,
                      wfc::AMT[wfc::OptAmt(wfc::ShownPatch(v))]);
-            Text(dc, x + 8, cy + 148, s, ok);
+            Text(dc, bx, cy + 76, s, ok);
         }
+    }
+
+    // Bridges bypass the solver, so they come from the voices matrix and not
+    // from OptTarget. Effective, not commanded, so they fade with the sound.
+    for(int src = 0; src < wfc::kVoices; src++)
+        for(int dst = 0; dst < wfc::kVoices; dst++)
+        {
+            if(wfc::GroupOf(src) == wfc::GroupOf(dst))
+                continue;
+            const float e = voices::CableEff(src, dst);
+            if(e < 0.01f)
+                continue;
+            const float f = e > 1.0f ? 1.0f : e;
+            // src above, so a bridge leaves its bottom edge; the reverse
+            // direction is nudged so the pair does not draw as one line
+            const int up = wfc::GroupOf(src) == 0, off = up ? -8 : 8;
+            const int x0 = cardX(src) + cw / 2 + off, x1 = cardX(dst) + cw / 2 + off;
+            const int y0 = up ? cardY(src) + ch : cardY(src);
+            const int y1 = up ? cardY(dst) : cardY(dst) + ch;
+            const COLORREF bc = RGB(30 + (int)(210 * f), 30 + (int)(150 * f), 30);
+            HPEN   pen = CreatePen(PS_SOLID, 1 + (int)(3 * f), bc);
+            HPEN   op  = (HPEN)SelectObject(dc, pen);
+            MoveToEx(dc, x0, y0, nullptr);
+            LineTo(dc, x1, y1);
+            SelectObject(dc, op);
+            DeleteObject(pen);
+            HBRUSH hb = CreateSolidBrush(bc);
+            RECT   head = {x1 - 4, y1 - 4, x1 + 4, y1 + 4};
+            FillRect(dc, &head, hb);
+            DeleteObject(hb);
+        }
+
+    // The panel plate, then the GUI-only strip, so the two never blur together
+    {
+        RECT pr = {kPx, kPy, kPx + kPW, kPy + kPH};
+        HBRUSH pb = CreateSolidBrush(RGB(26, 28, 35));
+        FillRect(dc, &pr, pb);
+        DeleteObject(pb);
+        HBRUSH fb = CreateSolidBrush(RGB(70, 74, 88));
+        FrameRect(dc, &pr, fb);
+        DeleteObject(fb);
+        RECT gr = {kRx, kGuiY, W - 16, kGuiY + 160};
+        HBRUSH gb = CreateSolidBrush(RGB(90, 82, 50));
+        FrameRect(dc, &gr, gb);
+        DeleteObject(gb);
+        Text(dc, kRx + 8, kGuiY + 6, "GUI ONLY - not on the panel", RGB(200, 180, 100));
+        Text(dc, kRx + 16, kGuiY + 130,
+             "pads A S D F G H J / 1-7   oct Z X   vol - =   break B   "
+             "settle N   cables M   F1-F8 + arrows: knob",
+             dim);
     }
 
     for(int k = 0; k < kSwitches; k++)
     {
         Text(dc, sw_r[k][0].x, sw_r[k][0].y - 16, kSwName[k], dim);
-        for(int c = 0; c < 3; c++)
+        for(int c = 0; c < kSwCells[k]; c++)
         {
-            // Cell 0 is up, 2 is down, so the drawing matches the hardware
-            const bool on = sw_pos[k] == 1 - c;
-            RECT b = {sw_r[k][c].x, sw_r[k][c].y, sw_r[k][c].x + sw_r[k][c].w,
-                      sw_r[k][c].y + sw_r[k][c].h - 2};
-            HBRUSH sb = CreateSolidBrush(on ? RGB(80, 120, 190)
-                                            : RGB(40, 43, 52));
-            FillRect(dc, &b, sb);
-            DeleteObject(sb);
-            Text(dc, sw_r[k][c].x + 8, sw_r[k][c].y + 3, kSwLabel[k][c],
+            // Cell 0 is up, so the drawing matches the hardware
+            const bool on = sw_cell[k] == c;
+            Box(dc, {sw_r[k][c].x, sw_r[k][c].y, sw_r[k][c].w, sw_r[k][c].h - 2},
+                on ? RGB(80, 120, 190) : RGB(40, 43, 52));
+            Text(dc, sw_r[k][c].x + 8, sw_r[k][c].y + 3, SwLabel(k, c),
                  on ? RGB(255, 255, 255) : dim);
         }
     }
 
     for(int i = 0; i < synth::kKnobs; i++)
     {
-        Bar(dc, {knob_r[i].x, knob_r[i].y + 20, knob_r[i].w, 14},
-            synth::Knob(i), i == sel_knob ? ok : RGB(96, 118, 170));
-        char s[64];
-        snprintf(s, sizeof(s), "%s %.2f", synth::KnobName(i), synth::Knob(i));
-        Text(dc, knob_r[i].x, knob_r[i].y, s, i == sel_knob ? ok : dim);
+        const Rect r   = knob_r[i];
+        const bool sel = i == sel_knob;
+        const COLORREF c = sel ? ok : RGB(96, 118, 170);
+        char s[32];
+        snprintf(s, sizeof(s), "%.2f", synth::Knob(i));
+        if(knob_vert[i])
+        {
+            const int cx = r.x + r.w / 2;
+            char nm[2][16];
+            snprintf(nm[0], 16, "%.3s", kKnobLabel[i]);
+            snprintf(nm[1], 16, "%s", kKnobLabel[i] + 4);
+            TextC(dc, cx, r.y - 36, nm[0], sel ? ok : dim);
+            TextC(dc, cx, r.y - 20, nm[1], sel ? ok : dim);
+            Box(dc, r, RGB(32, 34, 40));
+            const int fh = (int)(r.h * synth::Knob(i));
+            Box(dc, {r.x + 6, r.y + r.h - fh, r.w - 12, fh}, c);
+            TextC(dc, cx, r.y + r.h + 4, s, sel ? ok : dim);
+        }
+        else
+        {
+            const int cx = r.x + r.w / 2, cy = r.y + 46, rad = 30;
+            TextC(dc, cx, r.y, kKnobLabel[i], sel ? ok : dim);
+            HPEN   pen = CreatePen(PS_SOLID, 2, c);
+            HPEN   op  = (HPEN)SelectObject(dc, pen);
+            HBRUSH ob2 = (HBRUSH)SelectObject(dc, CreateSolidBrush(RGB(36, 39, 48)));
+            Ellipse(dc, cx - rad, cy - rad, cx + rad, cy + rad);
+            // 270 degree sweep, minimum at lower left
+            const double a = (225.0 - 270.0 * synth::Knob(i)) * 3.14159265 / 180.0;
+            MoveToEx(dc, cx, cy, nullptr);
+            LineTo(dc, cx + (int)(cos(a) * (rad - 4)), cy - (int)(sin(a) * (rad - 4)));
+            DeleteObject(SelectObject(dc, ob2));
+            SelectObject(dc, op);
+            DeleteObject(pen);
+            TextC(dc, cx, cy + rad + 4, s, sel ? ok : dim);
+        }
     }
 
     for(int p = 0; p < synth::kPads; p++)
     {
-        const bool on = synth::PadOn(p);
-        RECT       b  = {pad_r[p].x, pad_r[p].y, pad_r[p].x + pad_r[p].w,
-                   pad_r[p].y + pad_r[p].h};
-        HBRUSH     pb = CreateSolidBrush(on ? RGB(80, 120, 190)
-                                            : RGB(40, 43, 52));
-        FillRect(dc, &b, pb);
-        DeleteObject(pb);
+        const bool on   = synth::PadOn(p);
+        const bool conn = p == synth::kConnectorPad;
+        const int  v    = synth::PadVoice(p);
+        const int  grp  = v >= 0 ? wfc::GroupOf(v) : 0;
+        Box(dc, pad_r[p], conn ? (on ? RGB(214, 140, 40) : RGB(70, 52, 30))
+                               : Family(grp, on));
+        const COLORREF tc = on ? RGB(255, 255, 255)
+                               : (conn ? RGB(190, 150, 90) : FamilyText(grp));
         char s[48];
-        snprintf(s, sizeof(s), "%c  %.0fHz", (char)kPadKey[p], synth::PadHz(p));
-        Text(dc, pad_r[p].x + 6, pad_r[p].y + 6, s, on ? RGB(255, 255, 255)
-                                                       : dim);
+        snprintf(s, sizeof(s), "P%02d  %c", p + 3, (char)kPadKey[p]);
+        Text(dc, pad_r[p].x + 6, pad_r[p].y + 6, s, tc);
+        if(conn)
+            snprintf(s, sizeof(s), "%s", synth::ConnectorMode() ? "bridge+frz" : "bridge");
+        else
+            snprintf(s, sizeof(s), "%c%d %.0fHz", grp ? 'R' : 'L', v + 1,
+                     synth::PadHz(p));
+        Text(dc, pad_r[p].x + 6, pad_r[p].y + 36, s, tc);
+    }
+
+    for(int i = 0; i < 5; i++)
+    {
+        const bool mapped = i != 1;
+        Box(dc, xp_r[i], xp_on[i] ? RGB(150, 154, 168)
+                                  : (mapped ? RGB(52, 55, 66) : RGB(34, 36, 43)));
+        const COLORREF tc = xp_on[i] ? RGB(20, 20, 24) : (mapped ? dim : RGB(80, 84, 96));
+        char s[32];
+        if(kXpKey[i])
+            snprintf(s, sizeof(s), "%s  %c", kXpName[i], kXpKey[i]);
+        else
+            snprintf(s, sizeof(s), "%s", kXpName[i]);
+        Text(dc, xp_r[i].x + 6, xp_r[i].y + 4, s, tc);
+        Text(dc, xp_r[i].x + 6, xp_r[i].y + xp_r[i].h - 20, kXpFn[i], tc);
     }
 
     BitBlt(real, 0, 0, W, H, dc, 0, 0, SRCCOPY);
@@ -538,6 +733,14 @@ struct Lock
     ~Lock() { LeaveCriticalSection(&engine_cs); }
 };
 
+void XpAct(int i)
+{
+    if(i == 0 || i == 2)
+        synth::ShiftOctave(i - 1);
+    else if(i == 3 || i == 4)
+        synth::ShiftGain(i == 3 ? -1 : 1);
+}
+
 LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
 {
     switch(m)
@@ -554,24 +757,27 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
             for(int p = 0; p < synth::kPads; p++)
                 if((int)w == kPadKey[p] || (int)w == '1' + p)
                     synth::Press(p);
-            if(w == VK_SPACE)
-                sw_pos[0] = sw_pos[0] < 0 ? 0 : -1;
             if(w == 'B')
                 synth::Break();
             if(w == 'N')
                 synth::Settle();
+            if(w == 'V')
+                sw_cell[2] = (sw_cell[2] + 1) % kSwCells[2];   // spike
+            if(w == 'J')
+                sw_cell[3] = 1 - sw_cell[3];   // P05 mode
             if(w == 'M')
-                sw_pos[1] = sw_pos[1] == 1 ? -1 : sw_pos[1] + 1;   // cables
+                sw_cell[1] = (sw_cell[1] + 2) % 3;   // cables
             if(w == 'C')
-                sw_pos[0] = sw_pos[0] > 0 ? 0 : 1;
-            if(w == 'Z')
-                synth::ShiftOctave(-1);
-            if(w == 'X')
-                synth::ShiftOctave(1);
-            if(w == VK_OEM_MINUS)
-                synth::ShiftGain(-1);
-            if(w == VK_OEM_PLUS)
-                synth::ShiftGain(1);
+                sw_cell[4] = 1 - sw_cell[4];
+            {
+                const int xi = w == 'Z' ? 0 : w == 'X' ? 2
+                               : w == VK_OEM_MINUS ? 3 : w == VK_OEM_PLUS ? 4 : -1;
+                if(xi >= 0)
+                {
+                    XpAct(xi);
+                    xp_on[xi] = true;
+                }
+            }
             if(w >= VK_F1 && w <= VK_F8)
                 sel_knob = (int)w - VK_F1;
             if((w == VK_LEFT || w == VK_RIGHT) && sel_knob >= 0)
@@ -583,7 +789,7 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
             {
                 for(int p = 0; p < synth::kPads; p++)
                     synth::Release(p);
-                sw_pos[0] = 0;
+                sw_cell[0] = 1;
             }
             InvalidateRect(hw, nullptr, FALSE);
             return 0;
@@ -594,6 +800,8 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
             for(int p = 0; p < synth::kPads; p++)
                 if((int)w == kPadKey[p] || (int)w == '1' + p)
                     synth::Release(p);
+            if(w == 'Z' || w == 'X' || w == VK_OEM_MINUS || w == VK_OEM_PLUS)
+                xp_on[w == 'Z' ? 0 : w == 'X' ? 2 : w == VK_OEM_MINUS ? 3 : 4] = false;
             InvalidateRect(hw, nullptr, FALSE);
             return 0;
         }
@@ -612,11 +820,19 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
                     SetCapture(hw);
                 }
             for(int k = 0; k < kSwitches; k++)
-                for(int c = 0; c < 3; c++)
+                for(int c = 0; c < kSwCells[k]; c++)
                     if(mx >= sw_r[k][c].x && mx < sw_r[k][c].x + sw_r[k][c].w
                        && my >= sw_r[k][c].y
                        && my < sw_r[k][c].y + sw_r[k][c].h)
-                        sw_pos[k] = 1 - c;
+                        sw_cell[k] = c;
+            for(int i = 0; i < 5; i++)
+                if(mx >= xp_r[i].x && mx < xp_r[i].x + xp_r[i].w
+                   && my >= xp_r[i].y && my < xp_r[i].y + xp_r[i].h)
+                {
+                    mouse_xp = i;
+                    xp_on[i] = true;
+                    XpAct(i);
+                }
             for(int p = 0; p < synth::kPads; p++)
                 if(mx >= pad_r[p].x && mx < pad_r[p].x + pad_r[p].w
                    && my >= pad_r[p].y && my < pad_r[p].y + pad_r[p].h)
@@ -631,8 +847,13 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
             if(drag >= 0)
             {
                 Lock      lk;
-                const int dx = LOWORD(l) - drag_from.x;
-                float     v  = drag_at + (float)dx / (float)knob_r[drag].w;
+                // Faders are dragged up, knobs right
+                const float d = knob_vert[drag]
+                                    ? (float)(drag_from.y - (short)HIWORD(l))
+                                          / (float)knob_r[drag].h
+                                    : (float)(LOWORD(l) - drag_from.x)
+                                          / (float)knob_r[drag].w;
+                float v = drag_at + d;
                 synth::SetKnob(drag, min(1.0f, max(0.0f, v)));
                 InvalidateRect(hw, nullptr, FALSE);
             }
@@ -642,6 +863,11 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
             Lock lk;
             drag = -1;
             ReleaseCapture();
+            if(mouse_xp >= 0)
+            {
+                xp_on[mouse_xp] = false;
+                mouse_xp = -1;
+            }
             if(mouse_pad >= 0)
             {
                 synth::Release(mouse_pad);
@@ -678,9 +904,12 @@ int main(int argc, char** argv)
     wc.lpszClassName = "lapses";
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassA(&wc);
+    // Client area sized for the panel plus the cards; fits 1080p with its taskbar
+    RECT wr = {0, 0, 1740, 940};
+    AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
     HWND hw = CreateWindowA("lapses", "lapses", WS_OVERLAPPEDWINDOW,
-                            CW_USEDEFAULT, CW_USEDEFAULT, 1060, 560, nullptr,
-                            nullptr, wc.hInstance, nullptr);
+                            0, 0, wr.right - wr.left, wr.bottom - wr.top,
+                            nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hw, SW_SHOW);
 
     if(!AudioStart())
@@ -711,7 +940,7 @@ int main(int argc, char** argv)
             InvalidateRect(hw, nullptr, FALSE);
         }
         // 1 ms spun the window thread 1000 times a second, taking the engine
-        // lock on every pass for no benefit. The latch still re-asserts far
+        // lock on every pass for no benefit. The switches still re-assert far
         // faster than a finger moves.
         Sleep(5);
     }

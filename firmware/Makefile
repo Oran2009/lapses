@@ -6,10 +6,12 @@
 
 TARGET = lapses
 
-# The delay lines are 1.5 MB, so the app runs from QSPI with SDRAM for them
-APP_TYPE = BOOT_QSPI
+# Internal flash, so no Daisy bootloader is needed on the board. -O3 puts it
+# over the 128 KB; -O2 lands at 86%. The 1.5 MB of delay lines is SDRAM either
+# way.
+APP_TYPE = BOOT_NONE
 
-OPT = -O3
+OPT = -O2
 
 CPP_SOURCES = src/main.cpp src/panel.cpp src/synth.cpp src/voices.cpp \
               src/wfc.cpp

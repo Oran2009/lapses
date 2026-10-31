@@ -4,10 +4,14 @@
 // engine half dropped. The MPR121 register settings are the ones that were
 // tuned against the real board -- libDaisy's defaults miss presses.
 //
-// Pads:   P03..P09 play, P00/P01 octave down/up, P10/P11 volume down/up
-// Knobs:  S30..S35 on ADC 0..5, in HANDOFF 4.2 order
-// Switch: S07/S08 down latches
-// Spare:  the two faders (ADC 6,7), S09/S10 and P02 are unmapped
+// Pads:   P03..P09 play, P00/P02 octave down/up, P10/P11 volume down/up
+// Knobs:  S30..S35 on ADC 0..5, faders S36/S37 on ADC 6,7
+// Switch: S07/S08 hold left/both/right, S09/S10 cross-mod/none/cross-feed
+// Spare:  P01
+//
+// The engine is not reentrant and a solve is most of an audio block, so the
+// whole control side -- this and synth::Control -- runs in the main loop.
+// The audio callback only renders.
 
 #pragma once
 
@@ -17,12 +21,22 @@ namespace panel
 {
 constexpr int kPads = 12;
 
-bool Init(daisy::DaisySeed& hw);
+// Poll and PollPads run once every this many audio blocks, so at 48 kHz in
+// blocks of 48 they run at 250 Hz. Synthux's own firmware for this board
+// polls at the same rate: the block-rate burst of panel work couples into
+// the analog side as a tone, and 4 ms of touch latency is the price of
+// moving it down and thinning it out.
+constexpr int kPollDiv = 4;
 
-// Reads the knobs and the switch, and edge-triggers the pads into synth
+// `poll_rate` is how often Poll will actually be called, in Hz. It sets
+// AnalogControl's slew, which is wrong by that factor if it is guessed.
+bool Init(daisy::DaisySeed& hw, float poll_rate);
+
+// Reads the knobs and the switches, and edge-triggers the pads into synth
 void Poll();
 
-// The MPR121 is an I2C transaction, so the main loop calls this often
+// Separate from Poll only so the two bursts of work land on different
+// blocks instead of one bigger burst on the same one
 void PollPads();
 
 // False when the MPR121 did not answer at Init: every pad then reads untouched
