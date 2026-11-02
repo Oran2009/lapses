@@ -40,7 +40,6 @@ Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f};
 bool   frozen = false;
 int    cable_mode = 0;   // 0 none, 1 feed, 2 mod
 const int* rp_tiles = nullptr;   // the tiles the patch search weighs
-float      rm_in[kVoices] = {};  // cable depth arriving, per voice
 Limits limits = {};
 
 // The rule tables, rebuilt on every knob move: which tiles may sit beside
@@ -177,15 +176,6 @@ bool OkRatio(float a, float b)
 }
 
 // `in_amt` is the cable depth arriving at this voice, which only counts in
-// cross-modulation: there it is spent on the same tap and the same feedback
-// the voice modulates itself with, so it belongs in the same peak.
-float ModPeak(int t, int o, float in_amt, float fm)
-{
-    const float dp = DP[ModDepthOf(o)] * ModMul()
-                     + (cable_mode == 2 ? 0.3f * in_amt : 0.0f);
-    return (FL[TileF(t)] * fm + 0.2f * dp) * (1.0f + 0.35f * dp);
-}
-
 // How much cable is arriving at each sounding voice, as a sum of amounts.
 // Feed spends it as gain, mod spends it as modulation depth, so the two modes
 // budget the same number against different rules.
@@ -210,14 +200,6 @@ void InAmounts(const int8_t* pa, const int* act, int n, float* in_amt,
     }
 }
 
-// What the mod layer must weigh: the cable depth arriving at each voice,
-// taken from the patches the layer before it settled on.
-void SetModIn(const int8_t* pa, const int* act, int n)
-{
-    int in_deg[kVoices];
-    InAmounts(pa, act, n, rm_in, in_deg);
-}
-
 // The cable rules. Rule 4 is the old one -- no self patch ever, and no cycle
 // when strict -- but the cycle half is FEED ONLY: audio going round a ring
 // multiplies gain on top of each voice's own feedback, while modulation going
@@ -226,11 +208,9 @@ void SetModIn(const int8_t* pa, const int* act, int n)
 // Rule 6 is the cable cover: nobody sounding is left out of the patching, and
 // at high strictness they must all be in ONE structure rather than two.
 //
-// Rule 7 is the per-voice budget, and it is where the modes diverge. In feed
-// it is a gain budget -- a voice may not be both self-ringing and heavily fed
-// (break type `flood`). In mod it is spent inside ModPeak instead, so a voice
-// modulated hard from outside counts against the same peak limit as one
-// modulating itself (break type `wobble`).
+// Rule 7 is the per-voice gain budget, feed only: a voice may not be both
+// self-ringing and heavily fed (break type `flood`). Mod has no budget --
+// nothing constrains modulation depth.
 bool PatchesOK(const int8_t* pa, const int* act, int n, const int* tiles)
 {
     for(int i = 0; i < n; i++)
@@ -545,8 +525,8 @@ bool RepairPatches(const int* act, int n, int fixed_v, int fixed_opt,
     return rp_found;
 }
 
-// The mod layer, judged against the tiles the line layer just chose. Rule 5
-// prunes before the search, so 20^4 is never actually walked.
+// The mod layer. Nothing constrains depth, so the search is free: it walks
+// kModOpts^(n-1) and takes the configuration that changes fewest voices.
 bool       rm_found;
 float      rm_best_cost;
 int8_t     rm_best[kVoices], rm_trial[kVoices];
@@ -572,8 +552,6 @@ void RmRec(int i)
     const int n = rm_others[i];
     for(int o = 0; o < kModOpts; o++)
     {
-        if(ModPeak(rm_tiles[n], o, rm_in[n], solve_fm) > limits.Lpeak)
-            continue;
         rm_trial[n] = (int8_t)o;
         RmRec(i + 1);
     }
@@ -590,8 +568,6 @@ bool RepairMod(const int* act, int n, int fixed_v, int fixed_opt,
     memcpy(rm_trial, mod_opt, sizeof(rm_trial));
     if(fixed_v >= 0)
     {
-        if(ModPeak(tl[fixed_v], fixed_opt, rm_in[fixed_v], solve_fm) > limits.Lpeak)
-            return false;
         rm_trial[fixed_v] = (int8_t)fixed_opt;
     }
     rm_tiles     = tl;
@@ -727,19 +703,32 @@ float AttackT() { return Clamp(DelayBase() * 3.0f, 0.2f, 3.0f) * 0.35f; }
 float ModSpeed0() { return Clamp(1.0f / (DelayBase() * 8.0f), 0.08f, 2.5f); }
 float FbMul() { return Lerp(0.5f, 1.5f, knob.fb); }
 float DrvMul() { return Lerp(0.4f, 1.6f, knob.drive); }
-float ModMul() { return Lerp(0.0f, 1.5f, knob.mod); }
+// Raised from 1.5 when the mod rule went: nothing caps depth now, so the
+// knob is the only ceiling
+float ModMul() { return Lerp(0.0f, 4.0f, knob.mod); }
 float LoopCut() { return 300.0f * powf(24.0f, knob.filter); }
 float VoiceCutMul() { return Lerp(1.5f, 14.0f, knob.filter); }
 // Unrest used to ride on strictness, which made strict-but-restless and
 // loose-but-still unreachable. Its own control, so Control says how firmly
 // the rules hold and Unrest says how often the instrument moves by itself.
+// Control and Unrest ride one fader, tied in the SAME direction: the old
+// coupling ran them inversely, which is what made strict-but-restless and
+// loose-but-still unreachable. Those are now the two ends. Unrest lags over
+// the bottom third so there is still a tight-but-settled region.
+void SetAgitation(float a)
+{
+    knob.safe   = Clamp(a, 0.0f, 1.0f);
+    knob.unrest = Smooth(0.33f, 1.0f, knob.safe);
+    RebuildRules();
+}
+
 float LapseChance() { return Lerp(0.0f, 0.5f, knob.unrest); }
 float UnrestRate() { return Lerp(0.0f, 0.25f, knob.unrest); }
 
 const char* BreakName(BreakType t)
 {
     static const char* n[kBreakTypes]
-        = {"echo", "swell", "fuzz", "wobble", "flood", "cable"};
+        = {"echo", "swell", "fuzz", "flood", "cable"};
     return (int)t < kBreakTypes ? n[t] : "?";
 }
 
@@ -913,7 +902,6 @@ void Pass(int v, float now)
     if(!have_pat)
         have_pat = RepairPatches(act, n, v, 0, ft, pat);
 
-    SetModIn(have_pat ? pat : patch, act, n);
 
     int8_t md[kVoices];
     bool   have_mod = false;
@@ -940,6 +928,30 @@ void Pass(int v, float now)
 
     if(Rand() < LapseChance())
         BreakRule(-1, g, (float)(no + 1) * HopSeconds(), now);
+}
+
+// Letting go is a gesture too. A released voice keeps ringing on its own
+// tile, so give it a fresh one: the tail then fades with a different colour
+// than the note sounded with. Delivered as a break (kind 2) so the delay
+// crawls to it and the release scrubs.
+void RerollTail(int v, float now)
+{
+    if(v < 0 || v >= kVoices)
+        return;
+    // HOLD can keep a released voice in the constraint graph, and then its
+    // tile is not free: re-roll it the legal way, against its neighbours
+    if(sounding[v])
+    {
+        Pass(v, now);
+        return;
+    }
+    Change ch[kVoices];
+    for(int i = 0; i < kVoices; i++)
+        ch[i] = NoChange();
+    ch[v].tile      = RandomTile();
+    ch[v].skew      = 0;
+    const int order[1] = {v};
+    ApplyWave(ch, order, 1, 2, 0.0f, now);
 }
 
 void Heal(int g, float now)
@@ -971,7 +983,6 @@ void Heal(int g, float now)
                 ft[order[i]] = line[order[i]];
 
     const bool have_pat = RepairPatches(act, n, -1, 0, ft, pat);
-    SetModIn(have_pat ? pat : patch, act, n);
     const bool have_mod = RepairMod(act, n, -1, 0, ft, md);
 
     Change ch[kVoices];
@@ -1061,17 +1072,6 @@ void BreakRule(int type, int g, float offset, float now)
             if(b >= 0)
                 ch[b].tile
                     = MkTile(TileD(tb), TileF(tb) < 2 ? TileF(tb) : 2, 3);
-            break;
-        case kWobble:   // full depth, same rate, on an already hot loop
-            ch[a].mod = 7;
-            ch[a].tile
-                = MkTile(TileD(ta), TileF(ta) > 3 ? TileF(ta) : 3, TileR(ta));
-            if(b >= 0)
-            {
-                ch[b].mod = 7;
-                ch[b].tile = MkTile(TileD(tb), TileF(tb) > 3 ? TileF(tb) : 3,
-                                    TileR(tb));
-            }
             break;
         case kFlood:   // fed hard while already ringing, feed only
             ch[b].patch = 1 + a * 3 + 2;
@@ -1199,13 +1199,6 @@ int Diagnose(Violation* out, int max, int group)
             out[cnt++] = Violation{kSwell, {a, -1}};
         if(limits.ratio_on && shown_skew[a] && cnt < max)
             out[cnt++] = Violation{kEcho, {a, -1}};
-        if(cable_mode
-           && (DP[ModDepthOf(shown_mod[a])] > 0 || in_amt[a] > 0.0f)
-           && ModPeak(t, shown_mod[a], in_amt[a], fm) > limits.Lpeak && cnt < max)
-            out[cnt++] = Violation{kWobble, {a, -1}};
-        else if(!cable_mode && DP[ModDepthOf(shown_mod[a])] > 0
-                && ModPeak(t, shown_mod[a], 0.0f, fm) > limits.Lpeak && cnt < max)
-            out[cnt++] = Violation{kWobble, {a, -1}};
         // Rule 7: fed and ringing at once, which only feed can be
         if(cable_mode == 1 && cnt < max
            && (FL[TileF(t)] * fm + in_amt[a] > limits.Iflood

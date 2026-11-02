@@ -80,6 +80,23 @@ int   block     = 48;
 // low-mids and rings them for ever, which is the whole of the mud; with this
 // the repeats thin out as they pile up.
 constexpr float kLoopHpHz = 150.0f;
+
+// How long a broken delay takes to crawl to its new class. Long enough
+// that the tap movement reads as a pitch bend, not a glide. Reasoned,
+// not measured -- tune by ear.
+constexpr float kSweepT = 1.2f;
+
+// Room for a new voice is made at the BUS, not in the envelope: a voice's
+// tail is mostly its loop, so lifting the new voice's vca only drives its
+// line harder and takes seconds to be heard. These act on what each voice
+// actually sends out. Squared so the shadow is short -- fresh decays over
+// 2.5 s and a duck that long would pump on every press.
+// Measured 0.3 s after a press against three standing voices: the new voice
+// sits 2.25x above the others, and the wash dips 25%. More duck buys more
+// separation and a deeper dip -- 0.60/0.40 gives 2.5x and -34%.
+constexpr float kDuckOut = 0.45f;   // how far the others step back
+constexpr float kLiftOut = 2.0f;   // and how far the new one steps up
+constexpr float kRefHz   = 330.0f;   // the pitch at which that is unscaled
 float           loop_hp_c = 0.0f;
 
 // --------------------------------------------------------------- the maths
@@ -223,6 +240,9 @@ struct Voice
     float    m_dly, m_dly_t;
     float    m_fb, m_fb_t;
     float    m_pre, m_pre_t;
+    float    sweep;   // seconds of slow delay travel left after a break
+    float    outg, outg_t;   // what this voice sends to the bus
+    float    dryl, dryl_t;   // extra dry while it is the fresh one
     float    mod;   // its value this tick
 
     // What the loop's distortion put out last sample: the feedback path and
@@ -263,13 +283,15 @@ void Recoeff(float dt, float glide)
 
 void SetPartialFreqs(Voice& vo, bool snap)
 {
-    // Low notes get a shallower rolloff. The ear is least sensitive down
-    // there and four loops put their own fundamentals in the same region, so
-    // a note at the bottom octave needs more upper partials to say what one
-    // at the top says with six. Without this the timbre is pitch-proportional
-    // and the bottom octave is always the one that gets buried.
-    const float tilt = Clamp(1.9f - 0.55f * logf(440.0f / vo.hz) * 1.442695f,
-                             1.25f, 1.9f)
+    // Low notes get a shallower rolloff. Measured against the others, a
+    // 220 Hz voice was the LOUDEST on a meter and the dullest above 500 Hz,
+    // which is where a new note has to appear to be heard over the wash --
+    // its energy lands exactly where the wash is already thickest. Slope and
+    // floor were 0.55/1.25, which put 220 Hz at tilt 1.35 and 42% of its
+    // energy in that band; 1.5/0.55 puts it at 0.55 and 58%. Turn the floor
+    // down for more bite at the bottom, up if the low pads buzz.
+    const float tilt = Clamp(1.9f - 1.5f * logf(440.0f / vo.hz) * 1.442695f,
+                             0.55f, 1.9f)
                        * M().rolloff;
     for(int k = 0; k < kPartials; k++)
     {
@@ -318,6 +340,8 @@ void Init(float sample_rate, int block_size)
         memset(vo.line, 0, sizeof(float) * kDelayMax);
         vo.wr = 0;
         vo.hz = 220.0f;
+        vo.outg = vo.outg_t = 1.0f;
+        vo.dryl = vo.dryl_t = 1.0f;
         vo.vlp.Reset();
         vo.llp.Reset();
         vo.llp2.Reset();
@@ -419,6 +443,9 @@ void SetPitch(int i, float hz, bool snap)
 {
     if(snap)
         v[i].fresh = 1.0f;
+        v[i].sweep = 0.0f;
+        v[i].outg = v[i].outg_t = 1.0f;
+        v[i].dryl = v[i].dryl_t = 1.0f;
     v[i].hz = hz;
     SetPartialFreqs(v[i], snap);
 }
@@ -432,6 +459,8 @@ float Mod(int i) { return v[i].mod; }
 float ModDepth(int i) { return v[i].depth_now; }
 float Pan(int i) { return v[i].pan_now; }
 float LoopLevel(int i) { return v[i].fast; }
+float OutGain(int i) { return v[i].outg; }
+float DryLift(int i) { return v[i].dryl; }
 
 float Level()
 {
@@ -447,9 +476,9 @@ void SetHoldMask(int mask) { hold_mask = mask; }
 void SetPadHeld(int v, bool on) { pad_held[v] = on; }
 bool HoldSustains(int v)
 {
-    // 0.02 is -34 dB, picked as where a tail stops reading as a note
-    return !pad_held[v] && ((hold_mask >> (v / wfc::kGroupSize)) & 1)
-           && wfc::K().hold > 0.0f && Amp(v) > 0.02f;
+    // 0.02 is -34 dB, below which the floor is inaudible and should not pin
+    // a voice into the constraint graph
+    return ((hold_mask >> (v / wfc::kGroupSize)) & 1) && wfc::K().hold > 0.02f;
 }
 
 void Control(float now, float dt)
@@ -491,20 +520,20 @@ void Control(float now, float dt)
         // The envelope, which follows the Delay knob: long echoes get a long
         // release so the loop is still fed while it rings
         {
-            const float tgt = on && pad_held[i] ? 1.0f : 0.0f;
+            // HOLD is a floor, not a longer release: the selected group sounds
+            // continuously at the knob's level and a pad press rides on top.
+            const bool  sel = (hold_mask >> (i / wfc::kGroupSize)) & 1;
+            // The floor steps back for a fresh press, not just the wet tap:
+            // otherwise five voices droning at the floor bury the one pad
+            // you just pressed
+            const float flr
+                = sel ? wfc::K().hold * (1.0f - 0.5f * duck[i]) : 0.0f;
+            const float tgt = fmaxf(on && pad_held[i] ? 1.0f : 0.0f, flr);
             const float tau = tgt > vo.amp ? (atk / 3.0f > 0.005f ? atk / 3.0f
                                                                  : 0.005f)
                                            : (rel / 3.0f > 0.03f ? rel / 3.0f
                                                                  : 0.03f);
-            // Exponential, 1x to 60x: the useful range is a ratio (a tail to a
-            // minute-plus drone), not seconds; a pot rarely reaches 1.0 so the
-            // top 3% is true sustain. 60x is reasoned, not measured.
-            const bool  sel = (hold_mask >> (i / wfc::kGroupSize)) & 1;
-            const float hld = sel ? wfc::K().hold : 0.0f;
-            const bool  rls = tgt < vo.amp;
-            if(!(rls && hld >= 0.97f))
-                Approach(vo.amp, tgt,
-                         Coeff(rls ? tau * powf(60.0f, hld / 0.97f) : tau, dt));
+            Approach(vo.amp, tgt, Coeff(tau, dt));
         }
 
         // What the wave has actually delivered to this voice
@@ -556,7 +585,17 @@ void Control(float now, float dt)
         vo.fb_t   = feff;
         vo.lcut_t = lcut * M().damp;
         vo.pre_t  = pre;
-        vo.wet_t  = 0.8f * sqrtf(pre) * 0.7f * (1.0f - 0.45f * duck[i]);
+        vo.wet_t  = 0.8f * sqrtf(pre) * 0.7f;
+        vo.outg_t = 1.0f - kDuckOut * duck[i] * duck[i];
+        // The lift goes on the DRY only. A new voice's loop has not filled
+        // yet -- a low one least of all, since its delay is snapped to whole
+        // periods -- so lifting its whole output lifts mostly silence. The
+        // dry is the part that sounds the instant the pad goes down.
+        // and more of it the lower the voice: the delay is snapped to
+        // whole periods, so a 220 Hz loop takes twice as long to fill as
+        // a 440 Hz one and the dry has to carry it twice as long
+        const float slow = Clamp(kRefHz / vo.hz, 0.5f, 3.0f);
+        vo.dryl_t = 1.0f + kLiftOut * slow * vo.fresh * vo.fresh;
         Approach(vo.fresh, 0.0f, co.fresh);
         vo.vca_t  = vo.amp * 0.26f * (1.0f + 0.9f * vo.fresh);
         vo.vcut_t = Clamp(vo.hz * vcm * (0.18f + 0.82f * vo.amp)
@@ -579,11 +618,29 @@ void Control(float now, float dt)
                               ? wfc::AMT[wfc::OptAmt(po)] * sqrtf(pre) * 1.3f
                               : 0.0f;
 
-        Approach(vo.dly, vo.dly_t, co.dly);
+        // A break is an event, a repair is a recovery, so they do not travel
+        // the same way. Gain and drive snap to the broken value and heal back
+        // over the ordinary glide; the delay instead CRAWLS to it, which drags
+        // the read tap through the full line and scrubs everything already in
+        // it. That scrub is the most audible thing the instrument does -- it
+        // is what turning the Delay knob by hand sounds like.
+        if(wfc::TakeFlash(i) == 2)
+        {
+            vo.sweep = kSweepT;
+            vo.fb    = vo.fb_t;
+            vo.pre   = vo.pre_t;
+        }
+        const bool sweeping = vo.sweep > 0.0f;
+        if(sweeping)
+            vo.sweep -= dt;
+
+        Approach(vo.dly, vo.dly_t, sweeping ? Coeff(kSweepT, dt) : co.dly);
         Approach(vo.fb, vo.fb_t, co.fb);
         Approach(vo.lcut, vo.lcut_t, co.lcut);
         Approach(vo.pre, vo.pre_t, co.pre);
         Approach(vo.wet, vo.wet_t, co.wet);
+        Approach(vo.outg, vo.outg_t, co.wet);
+        Approach(vo.dryl, vo.dryl_t, co.wet);
         Approach(vo.vca, vo.vca_t, Clamp(co.vca * M().atk, 0.0f, 1.0f));
         Approach(vo.vcut, vo.vcut_t, co.vcut);
         Approach(vo.mspeed, vo.mspeed_t, co.mod_speed);
@@ -773,9 +830,11 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             // One tap per channel, both at the voice's own position. Panning
             // the side tap opposite instead only pulled the image to the
             // centre, which is what a correlated copy does.
-            const float mix = dry * (1.0f - in_mix);
-            l += (mix + pst * vo.wet) * vo.pan_l;
-            r += (mix + pst2 * vo.wet) * vo.pan_r;
+            // dryl is applied HERE and not to `dry` above, so the line is
+            // fed the same signal either way and the loop is unchanged
+            const float mix = dry * (1.0f - in_mix) * vo.dryl;
+            l += (mix + pst * vo.wet) * vo.pan_l * vo.outg;
+            r += (mix + pst2 * vo.wet) * vo.pan_r * vo.outg;
         }
         out_l[s] += l;
         out_r[s] += r;

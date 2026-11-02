@@ -92,10 +92,11 @@ void Poll()
     for(int i = 0; i < kAnalog; i++)
         analog[i].Process();
     // S30 Mod, S31 Feedback, S32 Delay, S33 Distortion, S34 Filter,
-    // S35 Hold, then the faders S36 Unrest and S37 Control
-    static const int kKnobOf[kAnalog] = {4, 1, 0, 2, 3, 7, 6, 5};
+    // S35 unassigned, then the faders S36 Agitation and S37 Hold
+    static const int kKnobOf[kAnalog] = {4, 1, 0, 2, 3, -1, -1, 7};
     for(int i = 0; i < kAnalog; i++)
         synth::SetKnob(kKnobOf[i], analog[i].Value());
+    synth::SetAgitation(analog[6].Value());
 
     // S07/S08 aims HOLD: up left group, centre both, down right
     const int a = switch_a.Read();

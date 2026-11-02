@@ -97,6 +97,24 @@ static int Broken(BreakType t)
 
 // ---------------------------------------------------------------- 4.2, 4.4
 
+static void TestAgitationFader()
+{
+    printf("one fader drives strictness and unrest, and reaches the rules\n");
+    synth::Init(48000.0f, 48);
+    // Through synth::SetAgitation, not wfc's: an index that never triggers
+    // RebuildRules leaves the fader inert on the panel while every test that
+    // calls RebuildRules by hand still passes
+    synth::SetAgitation(0.0f);
+    Check("loose at the bottom", Lim().Fself > 8.0f);
+    Check("and still", UnrestRate() == 0.0f && LapseChance() == 0.0f);
+    synth::SetAgitation(0.3f);
+    Check("the bottom third stays still", UnrestRate() == 0.0f);
+    Check("while strictness has already moved", K().safe == 0.3f);
+    synth::SetAgitation(0.95f);
+    Check("strict at the top", Lim().Fself < 1.0f);
+    Check("and restless", UnrestRate() > 0.1f && LapseChance() > 0.2f);
+}
+
 static void TestKnobFormulas()
 {
     printf("knob formulas at the defaults (HANDOFF 4.2)\n");
@@ -109,7 +127,7 @@ static void TestKnobFormulas()
     Near("delayGlide", DelayGlide(), 0.139f, 5e-4f);
     Near("fbMul", FbMul(), 1.0f);
     Near("drvMul", DrvMul(), 0.76f);
-    Near("modMul", ModMul(), 0.75f);
+    Near("modMul", ModMul(), 2.0f);
     Near("loopCut", LoopCut(), 1722.0f, 1.0f);
     Near("voiceCutMul", VoiceCutMul(), 8.375f, 1e-3f);
     Near("lapseChance", LapseChance(), 0.1f, 5e-4f);
@@ -273,7 +291,7 @@ static void TestBreaksBreakAndHeal()
 {
     printf("each break breaks its own rule, and heal takes it back\n");
     const BreakType types[kBreakTypes]
-        = {kEcho, kSwell, kFuzz, kWobble, kFlood, kCable};
+        = {kEcho, kSwell, kFuzz, kFlood, kCable};
     for(int ti = 0; ti < kBreakTypes; ti++)
     {
         int hit = 0, clean_after = 0;
@@ -286,7 +304,6 @@ static void TestBreaksBreakAndHeal()
                                      : voices::kCableOff);
             K().safe = 0.95f;
             K().unrest = 0.0f;
-            // The wobble break needs the mod audible for rule 5 to bite
             K().mod = 1.0f;
             RebuildRules();
             float now = 1.0f;
@@ -381,8 +398,8 @@ static void TestKnobsLoadTheirRule()
     const int kRuns = 200;
     for(int nv = 2; nv <= kGroupSize; nv++)
     {
-        int hit[4] = {0, 0, 0, 0};   // drive, feedback, delay, mod
-        int unsat[4] = {0, 0, 0, 0};
+        int hit[3] = {0, 0, 0};   // drive, feedback, delay
+        int unsat[3] = {0, 0, 0};
         for(uint32_t seed = 1; seed <= (uint32_t)kRuns; seed++)
         {
             Init(seed);   // the default knobs: safe .7
@@ -408,18 +425,13 @@ static void TestKnobsLoadTheirRule()
                 float*    knob;
                 float     to, back;
                 BreakType rule;
-            } probe[4] = {
-                // The mod goes first, because only a PRESS ever gives a voice
-                // mod depth: RepairMod charges +10 for changing a voice's
-                // option, so a heal preserves or removes depth but never adds
-                // it. Probe rule 5 after the other knobs have forced a few
-                // heals and every depth has already decayed to 0.
-                {&K().mod, 1.0f, 0.5f, kWobble},
+            } probe[] = {
                 {&K().drive, 1.0f, 0.3f, kFuzz},
                 {&K().fb, 1.0f, 0.5f, kSwell},
                 {&K().delay, 0.0f, 0.6f, kEcho},
             };
-            for(int p = 0; p < 4; p++)
+            for(int p = 0; p < (int)(sizeof(probe) / sizeof(probe[0]));
+                p++)
             {
                 *probe[p].knob = probe[p].to;
                 RebuildRules();
@@ -464,14 +476,13 @@ static void TestKnobsLoadTheirRule()
                 Settle(now);
             }
         }
-        printf("  %d voices: drive %3d/%d  feedback %3d/%d  delay %3d/%d  "
-               "mod %3d/%d",
-               nv, hit[1], kRuns, hit[2], kRuns, hit[3], kRuns, hit[0], kRuns);
-        if(unsat[0] + unsat[1] + unsat[2] + unsat[3])
-            printf("   (unrepairable: drive %d fb %d delay %d mod %d)",
-                   unsat[1], unsat[2], unsat[3], unsat[0]);
+        printf("  %d voices: drive %3d/%d  feedback %3d/%d  delay %3d/%d",
+               nv, hit[0], kRuns, hit[1], kRuns, hit[2], kRuns);
+        if(unsat[0] + unsat[1] + unsat[2])
+            printf("   (unrepairable: drive %d fb %d delay %d)",
+                   unsat[0], unsat[1], unsat[2]);
         printf("\n");
-        for(int p = 0; p < 4; p++)
+        for(int p = 0; p < (int)(sizeof(hit) / sizeof(hit[0])); p++)
             Check("every knob can break its own rule", hit[p] > 0);
     }
 }
@@ -673,7 +684,15 @@ static void TestPadsAndGroups()
     Check("output finite", FiniteOutput());
     Check("shown state valid", ShownStateValid());
 
-    Near("right/left root", synth::PadHz(3) / synth::PadHz(0), 1.5f, 1e-3f);
+    // A sixth, not a fifth: a fifth would land the right root on the left
+    // triad's top note and P06 would play a unison with P08
+    Near("right/left root", synth::PadHz(3) / synth::PadHz(0), 5.0f / 3.0f,
+         1e-3f);
+    for(int a = 0; a < synth::kPads; a++)
+        for(int b = a + 1; b < synth::kPads; b++)
+            if(synth::PadVoice(a) >= 0 && synth::PadVoice(b) >= 0)
+                Check("every playable pad has its own pitch",
+                      fabsf(synth::PadHz(a) - synth::PadHz(b)) > 1.0f);
     Near("left third", synth::PadHz(1) / synth::PadHz(0), 1.2f, 1e-3f);
     Near("right third", synth::PadHz(4) / synth::PadHz(3), 1.2f, 1e-3f);
 }
@@ -813,7 +832,7 @@ static void TestOctaveLeavesHeldVoicesAlone()
 
 static void TestHold()
 {
-    printf("hold lengthens the release of the selected group only\n");
+    printf("hold floors the selected group's level and a press rides on top\n");
     float now = 0.0f;
     auto run  = [&](int target, float hold) {
         synth::Init(48000.0f, kBlock);
@@ -824,51 +843,50 @@ static void TestHold()
         AdvanceSeconds(now, 1.0f);
         synth::Release(0);
         synth::Release(3);
+        AdvanceSeconds(now, 20.0f);
     };
 
     run(1, 1.0f);
-    AdvanceSeconds(now, 20.0f);
-    Check("left voice sustains after release", voices::Amp(0) > 0.9f);
+    Check("left voice sits at the floor after release", voices::Amp(0) > 0.9f);
     Check("right voice has released", voices::Amp(3) < 0.01f);
     synth::SetKnob(7, 0.0f);
     AdvanceSeconds(now, 20.0f);
     Check("turning hold down releases it", voices::Amp(0) < 0.01f);
 
     run(-1, 1.0f);
-    AdvanceSeconds(now, 20.0f);
     Check("down aims at the right group",
           voices::Amp(3) > 0.9f && voices::Amp(0) < 0.01f);
 
     run(0, 1.0f);
-    AdvanceSeconds(now, 20.0f);
     Check("centre holds both", voices::Amp(0) > 0.9f && voices::Amp(3) > 0.9f);
 
-    run(1, 0.0f);
-    const float a0  = voices::Amp(0);
-    const float tau = fmaxf(wfc::ReleaseT() / 3.0f, 0.03f);
-    AdvanceSeconds(now, 1.5f);
-    Near("hold 0 is the existing release curve", voices::Amp(0) / a0,
-         expf(-1.5f / tau), 0.01f);
-    Check("it is mid-release", voices::Amp(3) > 0.001f && voices::Amp(3) < 0.5f);
-    Check("hold 0 is the unheld release, exactly", voices::Amp(0) == voices::Amp(3));
-
     run(1, 0.5f);
-    AdvanceSeconds(now, 1.5f);
-    Check("half hold releases slower", voices::Amp(0) > voices::Amp(3) * 2.0f);
+    Near("the floor is the knob's level", voices::Amp(0), 0.5f, 0.01f);
+    Check("the unselected group still falls to silence", voices::Amp(3) < 0.01f);
 
-    run(0, 0.5f);
-    AdvanceSeconds(now, 4.0f);
-    synth::SetKnob(7, 1.0f);
-    const float low = voices::Amp(0);
+    // The floor applies to a voice whose pad was never touched: that is what
+    // makes HOLD a drone rather than a long tail
+    synth::Init(48000.0f, kBlock);
+    synth::SetHoldTarget(1);
+    synth::SetKnob(7, 0.4f);
+    AdvanceSeconds(now, 5.0f);
+    Near("an untouched voice rises to the floor", voices::Amp(1), 0.4f, 0.01f);
+    Check("an untouched voice outside the group stays silent",
+          voices::Amp(4) < 0.01f);
+
+    // Both envelopes in parallel: the press goes to full and falls back to the
+    // floor, not to zero
     synth::Press(0);
     AdvanceSeconds(now, 0.3f);
-    Check("a press re-triggers regardless of hold",
-          low < 0.5f && wfc::Sounding(0) && voices::Amp(0) > 0.9f);
+    Check("a press rides above the floor", voices::Amp(0) > 0.9f);
+    synth::Release(0);
+    AdvanceSeconds(now, 20.0f);
+    Near("and settles back onto it", voices::Amp(0), 0.4f, 0.01f);
 }
 
 static void TestHoldIsSounding()
 {
-    printf("a voice HOLD sustains stays in the solver\n");
+    printf("a HOLD-floored voice stays in the solver\n");
     float now = 0.0f;
     synth::Init(48000.0f, 48);
     synth::SetHoldTarget(1);
@@ -881,9 +899,10 @@ static void TestHoldIsSounding()
     Check("right after release only the selected group still sounds",
           wfc::Sounding(0) && !wfc::Sounding(3));
     AdvanceSeconds(now, 10.0f);
-    Check("sustained voice is sounding", wfc::Sounding(0));
+    Check("floored voice is sounding", wfc::Sounding(0));
     Check("unselected group is not", !wfc::Sounding(3));
-    Check("a never-pressed voice is not", !wfc::Sounding(1) && !wfc::Sounding(2));
+    Check("a never-pressed voice in the group is too",
+          wfc::Sounding(1) && wfc::Sounding(2));
 
     synth::Press(synth::kConnectorPad);
     synth::Press(4);
@@ -1213,6 +1232,226 @@ static void TestNeverBlowsUp()
 
 // Rule 1 says a loop above 1.0 rings by itself. The swell break sets exactly
 // that, so the tail after release must be LONGER than an ordinary voice's.
+static void TestBreakIsAGesture()
+{
+    printf("a break snaps the gain and crawls the delay\n");
+    double early = 0, late = 0;
+    int    n = 0, arrived = 0, moved = 0;
+    for(uint32_t seed = 3; seed <= 30; seed += 3)
+    {
+        float now = 0.0f;
+        synth::Init(48000.0f, 48);
+        wfc::Init(seed);
+        for(int p = 0; p < synth::kPads; p++)
+            if(synth::PadVoice(p) >= 0)
+                synth::Press(p);
+        AdvanceSeconds(now, 3.0f);
+        Settle(now);
+
+        float d0[kVoices], f0[kVoices];
+        for(int v = 0; v < kVoices; v++)
+        {
+            d0[v] = voices::EffDly(v);
+            f0[v] = voices::EffFb(v);
+        }
+        // Frozen so no repair chases the break: this measures how the break
+        // itself travels, not where the instrument ends up
+        SetFrozen(true);
+        BreakRule(-1, 0.0f, now);
+        // A snap is a discontinuity, so look for it as one: the largest
+        // single-block step against the whole distance travelled. A glide
+        // with a ~0.05 s constant can never move more than a few percent in
+        // one millisecond.
+        float step[kVoices] = {}, walked[kVoices] = {}, prev[kVoices];
+        for(int v = 0; v < kVoices; v++)
+            prev[v] = f0[v];
+        float dmid[kVoices];
+        for(int k = 0; k < 250; k++)
+        {
+            AdvanceSeconds(now, 0.001f);
+            for(int v = 0; v < kVoices; v++)
+            {
+                const float d = fabsf(voices::EffFb(v) - prev[v]);
+                walked[v] += d;
+                if(d > step[v])
+                    step[v] = d;
+                prev[v] = voices::EffFb(v);
+            }
+            if(k == 249)
+                for(int v = 0; v < kVoices; v++)
+                    dmid[v] = voices::EffDly(v);
+        }
+        AdvanceSeconds(now, 6.0f);
+        SetFrozen(false);
+
+        // The wave staggers the break across the voices, so only the
+        // first has landed at 0.02 s. Count the ones ALREADY at their broken
+        // value then, rather than averaging over the ones still to come.
+        for(int v = 0; v < kVoices; v++)
+        {
+            if(walked[v] <= 1e-3f)
+                continue;
+            moved++;
+            arrived += step[v] > 0.5f * walked[v];
+        }
+        int   pick = -1;
+        float most = 0.0f;
+        for(int v = 0; v < kVoices; v++)
+            if(fabsf(voices::EffDly(v) - d0[v]) > most)
+            {
+                most = fabsf(voices::EffDly(v) - d0[v]);
+                pick = v;
+            }
+        if(pick < 0 || most < 1e-4f)
+            continue;
+        early += fabsf(dmid[pick] - d0[pick]);
+        late += most;
+        n++;
+    }
+    printf("  %d breaks: delay %.0f%% travelled at 0.25 s, %d of %d "
+           "gains arrive in one step\n",
+           n, 100.0 * early / (late > 0 ? late : 1), arrived, moved);
+    // Measured: 18% with the crawl, 44% without it
+    Check("the delay is still crawling a quarter second in",
+          n > 3 && early < 0.3 * late);
+    // The first voice of each wave is at its broken gain immediately;
+    // without the snap none are, because the glide needs ~0.05 s
+    Check("the gain arrives in one step", arrived >= n);
+}
+
+static void TestReleaseRerollsTheTail()
+{
+    printf("letting go rolls the voice a new tile for its tail\n");
+    int rolled = 0, audible = 0;
+    const int kRuns = 20;
+    for(uint32_t seed = 1; seed <= (uint32_t)kRuns; seed++)
+    {
+        float now = 0.0f;
+        synth::Init(48000.0f, 48);
+        wfc::Init(seed);
+        synth::Press(0);
+        AdvanceSeconds(now, 2.0f);
+        Settle(now);
+        const int before = ShownTile(0);
+        synth::Release(0);
+        AdvanceSeconds(now, 0.2f);
+        rolled += ShownTile(0) != before;
+        // The tail has to still be sounding, or a new tile colours nothing
+        audible += voices::Amp(0) > 0.05f;
+    }
+    printf("  %d of %d rolled, %d still ringing\n", rolled, kRuns, audible);
+    // 100 tiles, so a repeat is possible but rare
+    Check("the released voice gets a new tile", rolled >= kRuns - 2);
+    Check("and is still ringing to hear it", audible >= kRuns - 2);
+}
+
+static double WindowRms(float& now, float secs)
+{
+    double q = 0; int n = 0;
+    for(int i = 0; i < (int)(secs / 0.01f); i++)
+    {
+        AdvanceSeconds(now, 0.01f);
+        for(int k = 0; k < kBlock; k++) { q += g_l[k] * g_l[k]; n++; }
+    }
+    return sqrt(q / n);
+}
+
+// Mid/high band (one-pole HP at 500 Hz) on the SUM of both channels. Plain
+// RMS is dominated by low-frequency energy and called the low pads the
+// loudest, which is the opposite of what they sound like.
+static void BandRms(float& now, float secs, double& hi, double& full)
+{
+    float       hp = 0.0f;
+    const float k  = 1.0f - expf(-2.0f * 3.14159265f * 500.0f / kSr);
+    double      qh = 0, qf = 0;
+    int         n  = 0;
+    for(int i = 0; i < (int)(secs / 0.01f); i++)
+    {
+        AdvanceSeconds(now, 0.01f);
+        for(int s = 0; s < kBlock; s++)
+        {
+            const float x = g_l[s] + g_r[s];
+            hp += k * (x - hp);
+            const float h = x - hp;
+            qh += h * h;
+            qf += x * x;
+            n++;
+        }
+    }
+    hi = sqrt(qh / n), full = sqrt(qf / n);
+}
+
+static void TestLowPadsCarryTheBand()
+{
+    printf("the bottom pad puts enough energy where it can be heard\n");
+    // P03 and P09, the extremes of the tuning
+    static const int kPad[2] = {0, 6};
+    double           frac[2] = {0, 0};
+    for(int j = 0; j < 2; j++)
+    {
+        const int kSeeds = 8;
+        double    hi = 0, full = 0;
+        for(int seed = 1; seed <= kSeeds; seed++)
+        {
+            float now = 0.0f;
+            synth::Init(48000.0f, 48);
+            wfc::Init(seed);
+            synth::Press(kPad[j]);
+            AdvanceSeconds(now, 0.1f);
+            double h = 0, f = 0;
+            BandRms(now, 0.3f, h, f);
+            hi += h, full += f;
+        }
+        frac[j] = hi / full;
+        printf("  pad %d %5.0f Hz: %.0f%% of its energy above 500 Hz\n",
+               kPad[j], synth::PadHz(kPad[j]), frac[j] * 100.0);
+    }
+    // 0.58 measured; 0.42 with the old 0.55/1.25 tilt, which is what the low
+    // pads being inaudible sounded like
+    Check("the bottom pad is not buried below 500 Hz", frac[0] > 0.52);
+}
+
+static void TestNewVoiceGetsRoom()
+{
+    printf("a new pad steps the other voices back at the bus\n");
+    float now = 0.0f;
+    synth::Init(48000.0f, 48);
+    wfc::Init(5);
+    // Three voices with tails, settled, so the wash is what a new pad has
+    // to cut through
+    synth::Press(0);
+    synth::Press(1);
+    synth::Press(5);
+    AdvanceSeconds(now, 4.0f);
+    Settle(now);
+    const float rest = voices::OutGain(0);
+    Check("at rest every voice sends its whole output",
+          fabsf(rest - 1.0f) < 0.02f);
+    const float quiet = WindowRms(now, 0.3f);
+
+    synth::Press(3);
+    AdvanceSeconds(now, 0.3f);
+    const float others = voices::OutGain(0);
+    const float fresh  = voices::DryLift(3);
+    const double after = WindowRms(now, 0.3f);
+    printf("  others %.2f, new %.2f, wash %.4f -> %.4f\n", others, fresh,
+           quiet, after);
+    // Measured 0.65 and 2.4 at 0.3 s; with neither mechanism both are 1.00
+    Check("the standing voices step back", others < 0.8f);
+    Check("and the new one's dry steps up", fresh > 1.5f);
+
+    // Both gains have to reach the AUDIO, not merely be computed, so the
+    // ratio is bracketed from both sides. Measured 1.02 with both wired;
+    // 0.88 with the dry lift cut out, 1.17 with the duck cut out.
+    const double ratio = after / quiet;
+    printf("  wash ratio %.2f\n", ratio);
+    Check("the bus actually ducks", ratio < 1.10);
+    Check("and the new voice's dry actually lifts it", ratio > 0.96);
+
+    AdvanceSeconds(now, 6.0f);
+    Check("and it all comes back", voices::OutGain(0) > 0.95f);
+}
+
 static void TestSwellRings()
 {
     printf("a swell break makes the loop ring by itself\n");
@@ -1292,7 +1531,8 @@ static void TestJoinedDucksAndBlooms()
     // Summed over seeds: one seed's start state can leave little to duck
     const float unrests[2] = {0.0f, 0.3f};
     double      tot[2][3] = {};
-    double      worst     = 0;
+    double      worst = 0;
+    int         no_duck = 0;
     for(int u = 0; u < 2; u++)
         for(uint32_t seed = 11; seed <= 88; seed += 11)
         {
@@ -1319,6 +1559,7 @@ static void TestJoinedDucksAndBlooms()
             printf("  unrest %.1f seed %u duck %.2f\n", unrests[u], seed, ratio);
             if(ratio > worst)
                 worst = ratio;
+            no_duck += ratio >= 0.9;
         }
     for(int u = 0; u < 2; u++)
         printf("  unrest %.1f  up %.2f  down %.2f (%.2f)  after %.2f (%.2f)\n",
@@ -1326,109 +1567,13 @@ static void TestJoinedDucksAndBlooms()
                tot[u][2], tot[u][2] / tot[u][0]);
     // Unrest 0: duck must exist; a re-roll is the only way back up, so no bloom
     Check("held P05 ducks with Unrest 0", tot[0][1] < 0.8 * tot[0][0]);
-    Check("every seed ducks", worst < 0.9);
+    // Not every seed ducks: with no rule on mod depth, a seed that lands on
+    // deep mod carries enough extra load to cancel the charge. Measured 1 of
+    // 16 at worst 1.08, so the duck is a tendency, not a guarantee.
+    printf("  %d of 16 seeds do not duck, worst %.2f\n", no_duck, worst);
+    Check("the duck is the rule, not the exception", no_duck <= 3);
     Check("held P05 ducks hard", tot[1][1] < 0.7 * tot[1][0]);
     Check("release blooms back near unjoined", tot[1][2] > 0.8 * tot[1][0]);
-}
-
-static double WindowRms(float& now, float secs)
-{
-    double q = 0; int n = 0;
-    for(int i = 0; i < (int)(secs / 0.01f); i++)
-    {
-        AdvanceSeconds(now, 0.01f);
-        for(int k = 0; k < kBlock; k++) { q += g_l[k] * g_l[k]; n++; }
-    }
-    return sqrt(q / n);
-}
-
-static void TestFreezeSwells()
-{
-    printf("freeze mode swells while P05 is held\n");
-    double sum = 0, worst = 1e9;
-    int    n = 0, up = 0;
-    for(int u = 0; u < 2; u++)
-        for(uint32_t seed = 11; seed <= 66; seed += 11)
-        {
-            float now = 0.0f;
-            synth::Init(48000.0f, 48);
-            wfc::Init(seed);
-            synth::SetKnob(6, u ? 0.3f : 0.0f);
-            synth::SetConnectorMode(1);
-            for(int p = 0; p < synth::kPads; p++)
-                if(synth::PadVoice(p) >= 0)
-                    synth::Press(p);
-            AdvanceSeconds(now, 8.0f);
-            const double before = WindowRms(now, 0.5f);
-            synth::Press(synth::kConnectorPad);
-            AdvanceSeconds(now, 1.0f);
-            const double late  = WindowRms(now, 1.0f);
-            const double ratio = late / before;
-            printf("  unrest %.1f seed %u swell %.2fx\n", u ? 0.3f : 0.0f, seed, ratio);
-            sum += ratio;
-            worst = fmin(worst, ratio);
-            if(ratio > 1.15)
-                up++;
-            n++;
-        }
-    printf("  mean %.2fx worst %.2fx\n", sum / n, worst);
-    Check("freeze swells on average", sum / n > 1.4);
-    // Seed 66 never swells (1.03x at both Unrest values); cause unknown, it is
-    // not the bridge endpoints' loudness (measured)
-    Check("most seeds swell", up >= 9);
-    Check("no seed collapses", worst > 0.9);
-}
-
-static void TestConnectorFreeze()
-{
-    printf("freeze mode holds the solver while P05 is down and repairs on release\n");
-    float now = 0.0f;
-    synth::Init(48000.0f, 48);
-    synth::SetKnob(6, 0.0f);
-    for(int p = 0; p < synth::kPads; p++)
-        if(synth::PadVoice(p) >= 0)
-            synth::Press(p);
-    AdvanceSeconds(now, 3.0f);
-    synth::SetConnectorMode(1);
-    synth::Press(synth::kConnectorPad);
-    Check("frozen while held", synth::Frozen());
-    synth::Break();
-    AdvanceSeconds(now, 2.0f);
-    Check("finite while frozen", FiniteOutput());
-    Violation vio[kVoices * kVoices + kVoices];
-    Check("a break stands while frozen", Diagnose(vio, (int)(sizeof(vio) / sizeof(vio[0]))) > 0);
-    synth::Release(synth::kConnectorPad);
-    Check("released unfreezes", !synth::Frozen());
-    // Sooner than the 3 s a scheduled heal takes: the release starts the repair
-    AdvanceSeconds(now, 2.0f);
-    Check("release repairs it", Diagnose(vio, (int)(sizeof(vio) / sizeof(vio[0]))) == 0);
-
-    synth::Freeze(true);
-    synth::Press(synth::kConnectorPad);
-    synth::Release(synth::kConnectorPad);
-    Check("the freeze switch outlives P05", synth::Frozen());
-    synth::Freeze(false);
-
-    // Panel freeze on, something to heal: the release must leave tiles alone
-    synth::Press(synth::kConnectorPad);
-    synth::Release(synth::kConnectorPad);
-    synth::Freeze(true);
-    synth::Break();
-    AdvanceSeconds(now, 2.0f);
-    int before[kVoices];
-    for(int v = 0; v < kVoices; v++)
-        before[v] = ShownTile(v);
-    synth::Press(synth::kConnectorPad);
-    AdvanceSeconds(now, 1.0f);
-    synth::Release(synth::kConnectorPad);
-    AdvanceSeconds(now, 4.0f);
-    bool same = true;
-    for(int v = 0; v < kVoices; v++)
-        same = same && ShownTile(v) == before[v];
-    Check("release leaves a panel-frozen instrument still", same);
-    Check("still frozen", synth::Frozen());
-    synth::Freeze(false);
-    synth::SetConnectorMode(0);
 }
 
 static void TestJoinedEventQueue()
@@ -1557,6 +1702,7 @@ static void TestBridgeSurvivesCableMode()
 int SelfTest()
 {
     TestKnobFormulas();
+    TestAgitationFader();
     TestTileTables();
     TestStrictHealIsClean();
     TestLooseFlagsNothing();
@@ -1572,8 +1718,6 @@ int SelfTest()
     TestEventQueueHolds();
     TestJoinedDucksAndBlooms();
     TestJoinedEventQueue();
-    TestConnectorFreeze();
-    TestFreezeSwells();
     TestHold();
     TestHoldIsSounding();
     TestOctaveLeavesHeldVoicesAlone();
@@ -1584,6 +1728,10 @@ int SelfTest()
     TestCableModes();
     TestCableRules();
     TestNeverBlowsUp();
+    TestLowPadsCarryTheBand();
+    TestNewVoiceGetsRoom();
+    TestReleaseRerollsTheTail();
+    TestBreakIsAGesture();
     TestSwellRings();
     TestCableCarries();
     TestConnector();

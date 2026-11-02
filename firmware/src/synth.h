@@ -20,13 +20,10 @@ void Press(int pad);
 void Release(int pad);
 bool PadOn(int pad);
 bool Joined();   // P05 is down
-// 0 charge: the groups' rules pay for each other's load. 1 freeze: the solver
-// stops while P05 is down and the release repairs. Host-only for now.
-void SetConnectorMode(int m);
-int  ConnectorMode();
-
 // Which group S07/S08 sends HOLD to: +1 left (up), 0 both, -1 right (down)
 void SetHoldTarget(int pos);
+// S36: one fader for Control and Unrest together
+void SetAgitation(float a);
 
 // Clamped to +-2 octaves. True when it moved.
 bool ShiftOctave(int delta);

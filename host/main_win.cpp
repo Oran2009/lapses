@@ -9,7 +9,7 @@
 //   octave   Z / X
 //   volume   - / =
 //   knobs    drag with the mouse, or F1..F6 then arrow keys
-//   break    B,   settle  N,   freeze  C,   cables  M,   P05 mode  J
+//   break    B,   settle  N,   freeze  C,   cables  M
 //   panic    escape
 
 #include "synth.h"
@@ -267,7 +267,7 @@ const char  kXpKey[5]  = {'Z', 0, 'X', '-', '='};
 // Engine knob index -> the panel's name, so the window reads like the board
 const char* kKnobLabel[synth::kKnobs]
     = {"S32 delay", "S31 feedback", "S33 distortion", "S34 filter",
-       "S30 mod",   "S37 control",  "S36 unrest",     "S35 HOLD"};
+       "S30 mod",   "S36 agitation", "",              "S37 HOLD"};
 
 // Panel replica on the left, cards and GUI-only controls to its right
 constexpr int kPx = 16, kPy = 16, kPW = 540, kPH = 908;
@@ -278,11 +278,11 @@ constexpr int kSwW = 140;
 // way the Touch 2's do rather than as keyboard toggles. Cell 0 is the top.
 // Pos() gives the -1 down / 0 centre / +1 up the engine expects, for the two
 // hardware switches. The third is the voice-model spike and exists only here.
-constexpr int kSwitches   = 5;
+constexpr int kSwitches   = 4;
 constexpr int kSwMaxCells = voices::kModels;
-const int     kSwCells[kSwitches] = {3, 3, voices::kModels, 2, 2};
+const int     kSwCells[kSwitches] = {3, 3, voices::kModels, 2};
 Rect          sw_r[kSwitches][kSwMaxCells];
-int           sw_cell[kSwitches] = {1, 1, 0, 0, 0};
+int           sw_cell[kSwitches] = {1, 1, 0, 0};
 
 inline int Pos(int k) { return 1 - sw_cell[k]; }
 
@@ -290,11 +290,9 @@ const char* kSwLabel[kSwitches][kSwMaxCells]
     = {{"hold left", "hold both", "hold right"},
        {"cross-mod", "no cables", "cross-feed"},
        {},
-       {"charge", "freeze"},
        {"live", "freeze"}};
 const char* kSwName[kSwitches] = {"S07/S08 HOLD", "S09/S10 cables",
-                                  "voice model (V)", "P05 mode (J)",
-                                  "freeze (C)"};
+                                  "voice model (V)", "freeze (C)"};
 
 // The model cells are named by the engine, so there is one list and not two
 const char* SwLabel(int k, int c)
@@ -303,17 +301,16 @@ const char* SwLabel(int k, int c)
 }
 
 // Exactly what panel::Poll does with them, so there is one behaviour and not
-// two. Freeze has no hardware switch; it is the fifth cell group here.
+// two. Freeze has no hardware switch; it is the fourth cell group here.
 
 void ApplySwitches()
 {
     synth::SetHoldTarget(Pos(0));
-    synth::Freeze(sw_cell[4]);
+    synth::Freeze(sw_cell[3]);
     synth::SetCableMode(Pos(1) > 0   ? voices::kCableMod
                         : Pos(1) < 0 ? voices::kCableFeed
                                      : voices::kCableOff);
     voices::SetModel(sw_cell[2]);
-    synth::SetConnectorMode(sw_cell[3]);
 }
 
 void Layout()
@@ -322,16 +319,17 @@ void Layout()
     auto Y = [](float f) { return kPy + (int)(kPH * f); };
     struct Spot { int k; float fx, fy; };
     static const Spot knobs[] = {{1, .2f, .35f}, {0, .4f, .35f}, {2, .6f, .35f},
-                                 {3, .8f, .35f}, {4, .2f, .48f}, {7, .8f, .48f}};
+                                 {3, .8f, .35f}, {4, .2f, .48f}};
     for(const Spot& sp : knobs)
     {
         knob_r[sp.k]    = {X(sp.fx) - 50, Y(sp.fy) - 46, 100, 96};
         knob_vert[sp.k] = false;
     }
     const int fh = Y(.54f) - Y(.29f);
-    knob_r[6] = {X(.06f) - 18, Y(.29f), 36, fh};
-    knob_r[5] = {X(.94f) - 18, Y(.29f), 36, fh};
-    knob_vert[5] = knob_vert[6] = true;
+    knob_r[5] = {X(.06f) - 18, Y(.29f), 36, fh};   // S36 agitation
+    knob_r[7] = {X(.94f) - 18, Y(.29f), 36, fh};   // S37 hold
+    knob_r[6] = {0, 0, 0, 0};   // unrest has no control of its own now
+    knob_vert[5] = knob_vert[7] = true;
 
     // Engine pad order is P03 P04 P05 P06 P07 P08 P09
     static const float pf[synth::kPads][2] = {{.10f, .83f}, {.30f, .80f},
@@ -645,6 +643,8 @@ void Paint(HWND hw)
     for(int i = 0; i < synth::kKnobs; i++)
     {
         const Rect r   = knob_r[i];
+        if(r.w == 0)
+            continue;
         const bool sel = i == sel_knob;
         const COLORREF c = sel ? ok : RGB(96, 118, 170);
         char s[32];
@@ -695,7 +695,7 @@ void Paint(HWND hw)
         snprintf(s, sizeof(s), "P%02d  %c", p + 3, (char)kPadKey[p]);
         Text(dc, pad_r[p].x + 6, pad_r[p].y + 6, s, tc);
         if(conn)
-            snprintf(s, sizeof(s), "%s", synth::ConnectorMode() ? "bridge+frz" : "bridge");
+            snprintf(s, sizeof(s), "bridge");
         else
             snprintf(s, sizeof(s), "%c%d %.0fHz", grp ? 'R' : 'L', v + 1,
                      synth::PadHz(p));
@@ -763,12 +763,10 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
                 synth::Settle();
             if(w == 'V')
                 sw_cell[2] = (sw_cell[2] + 1) % kSwCells[2];   // spike
-            if(w == 'J')
-                sw_cell[3] = 1 - sw_cell[3];   // P05 mode
             if(w == 'M')
                 sw_cell[1] = (sw_cell[1] + 2) % 3;   // cables
             if(w == 'C')
-                sw_cell[4] = 1 - sw_cell[4];
+                sw_cell[3] = 1 - sw_cell[3];
             {
                 const int xi = w == 'Z' ? 0 : w == 'X' ? 2
                                : w == VK_OEM_MINUS ? 3 : w == VK_OEM_PLUS ? 4 : -1;
@@ -853,8 +851,11 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
                                           / (float)knob_r[drag].h
                                     : (float)(LOWORD(l) - drag_from.x)
                                           / (float)knob_r[drag].w;
-                float v = drag_at + d;
-                synth::SetKnob(drag, min(1.0f, max(0.0f, v)));
+                const float v = min(1.0f, max(0.0f, drag_at + d));
+                if(drag == 5)
+                    synth::SetAgitation(v);
+                else
+                    synth::SetKnob(drag, v);
                 InvalidateRect(hw, nullptr, FALSE);
             }
             return 0;

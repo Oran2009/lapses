@@ -76,7 +76,6 @@ enum BreakType
     kEcho = 0,
     kSwell,
     kFuzz,
-    kWobble,
     kFlood,
     kCable,
     kBreakTypes
@@ -95,6 +94,8 @@ const char* BreakName(BreakType t);
 Knobs&      K();
 // Recomputes the rule tables. Call after any knob move.
 void        RebuildRules();
+// One fader for both: sets safe, and unrest from it. Rebuilds the rules.
+void        SetAgitation(float a);
 
 const Limits& Lim();
 
@@ -164,6 +165,8 @@ int  TakeFlash(int v);
 
 // A pad press: re-roll this voice and settle the others around it (4.5)
 void Pass(int v, float now);
+// A pad let go: the voice's tail gets a tile of its own
+void RerollTail(int v, float now);
 // Repair with nothing pinned: after a knob move, a strictness change, or a
 // scheduled return from a break
 void Heal(float now);

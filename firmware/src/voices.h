@@ -70,13 +70,13 @@ float Pitch(int v);
 // smoothed parameter towards what the shown WFC state and the knobs ask for.
 void Control(float now, float dt);
 
-// Bit g set: HOLD (wfc::K().hold) lengthens the release of group g's voices
+// Bit g set: HOLD (wfc::K().hold) is group g's amplitude floor
 void SetHoldMask(int mask);
 
 // The pad's own state, apart from wfc::Sounding: a voice HOLD keeps sounding
 // is still released as far as the envelope is concerned. Defaults to true.
 void SetPadHeld(int v, bool on);
-// Released but HOLD is keeping it audible, so the solver must still count it
+// HOLD is floating this voice above silence, so the solver must count it
 bool HoldSustains(int v);
 
 // One block of audio. Adds into out_l/out_r, which must already be the dry
@@ -102,7 +102,12 @@ float EffDrv(int v);     // the loop's pre-gain
 float Mod(int v);        // the modulator right now, -1..1
 float ModDepth(int v);   // how much of it is being spent, 0..1.5
 float Pan(int v);        // -1..1
-float LoopLevel(int v);  // what the loop is putting out
+float LoopLevel(int v);
+// What this voice is sending to the bus right now: 1 at rest, less while
+// another voice is fresh, more while it is the fresh one
+float OutGain(int v);
+// Extra dry a freshly pressed voice sends, before its loop has filled
+float DryLift(int v);  // what the loop is putting out
 
 // The loudest envelope, for the LED
 float Level();

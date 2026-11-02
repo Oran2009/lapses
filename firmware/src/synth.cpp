@@ -15,10 +15,12 @@ namespace synth
 {
 namespace
 {
-// Two just triads a fifth apart (1, 6/5, 3/2 and 3/2, 9/5, 9/4). Index 2 is
-// the connector and never read for pitch.
-const int kRatN[kPads] = {1, 6, 0, 3, 9, 3, 9};
-const int kRatD[kPads] = {1, 5, 1, 2, 5, 2, 4};
+// Two just minor triads a SIXTH apart (1, 6/5, 3/2 and 5/3, 2, 5/2). Not a
+// fifth: the triad itself spans a fifth, so transposing by one put the right
+// group's root on the left group's top note and P06 and P08 played a unison.
+// Index 2 is the connector and never read for pitch.
+const int kRatN[kPads] = {1, 6, 0, 5, 2, 3, 5};
+const int kRatD[kPads] = {1, 5, 1, 3, 1, 2, 2};
 constexpr int kRoot = 9;   // A
 
 bool  held[kPads];
@@ -124,12 +126,8 @@ float Limit(float x)
 
 float now_s = 0.0f;
 
-// Measured: about +5 dB over a 2 s hold, saturating; below ~0.9 nothing happens
-constexpr float kFreezeBridge = 2.2f;
-
-int  connector_mode = 0;
-bool user_freeze    = false;
-bool conn_frozen    = false;
+bool  user_freeze = false;
+float agit_last   = -1.0f;
 
 void UpdateBridges()
 {
@@ -141,20 +139,9 @@ void UpdateBridges()
             if(wfc::Sounding(v) && (a[g] < 0 || wfc::StartedAt(v) > wfc::StartedAt(a[g])))
                 a[g] = v;
     }
-    const bool down   = held[kConnectorPad];
-    const bool freeze = down && connector_mode == 1;
-    wfc::SetJoined(down && connector_mode == 0, now_s);
-    if(freeze != conn_frozen)
-    {
-        conn_frozen = freeze;
-        wfc::SetFrozen(user_freeze || freeze);
-        // Nothing else would start the repair that tucks the swell back in
-        // Not under the panel freeze: Heal rewrites tiles whatever the flag says
-        if(!freeze && !user_freeze)
-            wfc::Heal(now_s);
-    }
-    const bool on = held[kConnectorPad] && a[0] >= 0 && a[1] >= 0;
-    const float amt = connector_mode == 1 ? kFreezeBridge : wfc::AMT[1];
+    wfc::SetJoined(held[kConnectorPad], now_s);
+    const bool  on  = held[kConnectorPad] && a[0] >= 0 && a[1] >= 0;
+    const float amt = wfc::AMT[1];
     voices::SetBridge(0, on ? a[0] : -1, on ? a[1] : -1, amt);
     voices::SetBridge(1, on ? a[1] : -1, on ? a[0] : -1, amt);
 }
@@ -194,11 +181,11 @@ void Init(float sample_rate, int block_size)
         pad_hz[p] = 0.0f;
     }
     octave         = 0;
-    connector_mode = 0;
     voices::SetHoldMask(3);
     wfc::K().hold = 0.0f;
     now_s          = 0.0f;
-    user_freeze = conn_frozen = false;
+    user_freeze = false;
+    agit_last   = -1.0f;
     ShiftGain(0);
 
     memset(comb_buf, 0, sizeof(comb_buf));
@@ -228,13 +215,6 @@ int  PadVoice(int p) { return kPadVoice[p]; }
 bool PadOn(int p) { return held[p]; }
 bool Joined() { return held[kConnectorPad]; }
 
-void SetConnectorMode(int m)
-{
-    connector_mode = m == 1 ? 1 : 0;
-    UpdateBridges();
-}
-int ConnectorMode() { return connector_mode; }
-
 void Press(int pad)
 {
     if(held[pad])
@@ -258,6 +238,9 @@ void Release(int pad)
 {
     held[pad] = false;
     SyncSounding(now_s);
+    const int v = kPadVoice[pad];
+    if(v >= 0)
+        wfc::RerollTail(v, now_s);
     UpdateBridges();
 }
 
@@ -298,9 +281,8 @@ void SetKnob(int i, float val)
     if(i < 0 || i >= kKnobs || fabsf(k[i] - val) < 0.004f)
         return;
     k[i] = val;
-    // Only four of the eight reach the rules, and the rebuild is 10,000
-    // tile pairs
-    if(i == 0 || i == 1 || i == 2 || i == 5)
+    // Only these reach the rules, and the rebuild is 10,000 tile pairs
+    if(i == 0 || i == 1 || i == 2)
         wfc::RebuildRules();
     wfc::KnobsMoved(now_s);
 }
@@ -421,11 +403,22 @@ const char* CableName(int m) { return voices::CableName(m); }
 
 void Break() { wfc::BreakRule(-1, 0.0f, now_s); }
 void Settle() { wfc::Heal(now_s); }
+// Same deadband as SetKnob, against the fader's own value rather than a
+// struct field, because this one writes two
+void SetAgitation(float a)
+{
+    if(fabsf(agit_last - a) < 0.004f)
+        return;
+    agit_last = a;
+    wfc::SetAgitation(a);
+    wfc::KnobsMoved(now_s);
+}
+
 void SetHoldTarget(int pos) { voices::SetHoldMask(pos > 0 ? 1 : pos < 0 ? 2 : 3); }
 void Freeze(bool on)
 {
     user_freeze = on;
-    wfc::SetFrozen(on || conn_frozen);
+    wfc::SetFrozen(on);
 }
 bool Frozen() { return wfc::Frozen(); }
 
