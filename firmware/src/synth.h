@@ -10,8 +10,7 @@
 
 namespace synth
 {
-constexpr int kPads = wfc::kPads;   // 7 playable
-constexpr int kConnectorPad = 2;   // momentary, no voice
+constexpr int kPads = wfc::kPads;   // 7, one voice each
 
 void Init(float sample_rate, int block_size);
 
@@ -19,11 +18,12 @@ void Init(float sample_rate, int block_size);
 void Press(int pad);
 void Release(int pad);
 bool PadOn(int pad);
-bool Joined();   // P05 is down
-// Which group S07/S08 sends HOLD to: +1 left (up), 0 both, -1 right (down)
-void SetHoldTarget(int pos);
-// S36: one fader for Control and Unrest together
-void SetAgitation(float a);
+// 0..1 contact force on a held pad. Leaning past the threshold breaks the
+// pad's group, so the player can cause a break instead of waiting for one.
+void  SetPressure(int pad, float p);
+float Pressure(int pad);
+// What the pad reads as resting force: a lean is measured against this
+float PressureRest(int pad);
 
 // Clamped to +-2 octaves. True when it moved.
 bool ShiftOctave(int delta);
@@ -47,8 +47,12 @@ void Process(float* l, float* r, int n, const float* in = nullptr);
 // 0..1: how far the line input has taken over from the partials
 float InputMix();
 
-// 0..1, for the LED: tracks the voices and so follows the release
+// 0..1, for the LED: the loudest voice's envelope, so it follows the pads,
+// the HOLD floor and the release alike
 float Level();
+
+// True once per delivered break, for the LED's stutter
+bool TookBreak();
 
 // Output trim in 3 dB steps, 0 down to -30 dB. True when it moved.
 bool ShiftGain(int delta);

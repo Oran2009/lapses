@@ -25,6 +25,13 @@ bool     pads_ok   = false;
 uint16_t pad_state = 0, last_pads = 0;
 int      blink     = 0;
 
+// Delta at full press, per playable electrode, measured on this board by
+// Synthux Academy (github.com/Synthux-Academy/TouchString, touch/pads.cpp)
+const float kMaxDelta[synth::kPads]
+    = {375.0f, 460.0f, 375.0f, 375.0f, 375.0f, 425.0f, 425.0f};
+float pressure[synth::kPads] = {};
+int   press_turn             = 0;
+
 }  // namespace
 
 bool Init(DaisySeed& hw, float poll_rate)
@@ -76,8 +83,37 @@ bool PadsOk() { return pads_ok; }
 
 void PollPads()
 {
-    if(pads_ok)
-        pad_state = mpr.Touched();
+    if(!pads_ok)
+        return;
+    pad_state = mpr.Touched();
+
+    // Contact force, one electrode per poll. Reading all seven every time
+    // costs 21 bytes of blocking I2C in the main loop where the touch read
+    // costs two, which starved the loop and broke up the audio. Round robin
+    // refreshes each pad every 28 ms -- ample for leaning on a pad, which is
+    // a gesture you make over a tenth of a second at least.
+    const int p = press_turn;
+    press_turn  = (press_turn + 1) % synth::kPads;
+    const int e = p + kFirstPad;
+
+    float target = 0.0f;
+    if(pad_state & (1u << e))
+    {
+        const int base  = (int)mpr.BaselineData(e);
+        const int filt  = (int)(mpr.FilteredData(e) & 0x03FF);
+        const int delta = base > filt ? base - filt : 0;
+        if(delta >= 6)
+        {
+            // Squared, so an ordinary press sits low and the top of the
+            // range is somewhere you have to lean to reach
+            const float n = (float)(delta - 5) / (kMaxDelta[p] - 5.0f);
+            target        = n > 1.0f ? 1.0f : n * n;
+        }
+    }
+    pressure[p] += (target - pressure[p]) * 0.5f;
+    if(pressure[p] < 0.01f)
+        pressure[p] = 0.0f;
+    synth::SetPressure(p, pressure[p]);
 }
 
 int TakeBlink()
@@ -91,16 +127,11 @@ void Poll()
 {
     for(int i = 0; i < kAnalog; i++)
         analog[i].Process();
-    // S30 Mod, S31 Feedback, S32 Delay, S33 Distortion, S34 Filter,
-    // S35 unassigned, then the faders S36 Agitation and S37 Hold
+    // S30 Mod, S31 Feedback, S32 Delay, S33 Distortion, S34 Filter.
+    // S35 and the S36 fader are unassigned; S37 is Hold.
     static const int kKnobOf[kAnalog] = {4, 1, 0, 2, 3, -1, -1, 7};
     for(int i = 0; i < kAnalog; i++)
         synth::SetKnob(kKnobOf[i], analog[i].Value());
-    synth::SetAgitation(analog[6].Value());
-
-    // S07/S08 aims HOLD: up left group, centre both, down right
-    const int a = switch_a.Read();
-    synth::SetHoldTarget(a == Switch3::POS_UP ? 1 : a == Switch3::POS_DOWN ? -1 : 0);
 
     // S09/S10 picks what a cable carries. Centre is none at all, up is
     // cross-modulation, down is cross-feed; the two live positions also turn

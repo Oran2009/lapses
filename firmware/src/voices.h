@@ -71,7 +71,6 @@ float Pitch(int v);
 void Control(float now, float dt);
 
 // Bit g set: HOLD (wfc::K().hold) is group g's amplitude floor
-void SetHoldMask(int mask);
 
 // The pad's own state, apart from wfc::Sounding: a voice HOLD keeps sounding
 // is still released as far as the envelope is concerned. Defaults to true.
@@ -106,8 +105,9 @@ float LoopLevel(int v);
 // What this voice is sending to the bus right now: 1 at rest, less while
 // another voice is fresh, more while it is the fresh one
 float OutGain(int v);
+float BusLvl(int v);   // what it is putting on the bus right now
 // Extra dry a freshly pressed voice sends, before its loop has filled
-float DryLift(int v);  // what the loop is putting out
+float DryLift(int v);
 
 // The loudest envelope, for the LED
 float Level();

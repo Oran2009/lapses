@@ -38,13 +38,28 @@ inline float Smooth(float a, float b, float x)
 
 Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f};
 bool   frozen = false;
+// How a wave travels: the gap between one voice changing and the next, and,
+// past kSpread, whether it carries into the other group. It had a fader of
+// its own and did not earn it -- the difference is not audible unless you
+// are listening for it -- so it is pinned, below kSpread, which leaves the
+// two groups as separate as they were. Off the Delay knob either way.
+// Pinned. 0.35 was a guess and it cost the breaks their legibility: at a
+// 0.29 s hop the wave takes 1.8 s to cross seven voices, so the victim can
+// change two seconds after the LED. Measured over the first 0.4 s after a
+// break, an echo moves the mix 1.3% at 0.35 and 4.8% at 0.02; the whole
+// wave still takes 0.25 s, which reads as a cascade rather than a click.
+float  ripple = 0.02f;
+// What each voice is actually putting out, pushed in from the audio side
+// once a block. wfc cannot ask voices directly -- voices is the layer above
+// -- and a break needs it to avoid landing on something inaudible.
+float  level[kVoices] = {};
 int    cable_mode = 0;   // 0 none, 1 feed, 2 mod
 const int* rp_tiles = nullptr;   // the tiles the patch search weighs
 Limits limits = {};
 
 // The rule tables, rebuilt on every knob move: which tiles may sit beside
 // which (pair rules 1 to 3), and which a voice may hold at all (rule 1)
-uint8_t compat[kTiles * kTiles];
+uint8_t compat[kDelays * kDelays];
 uint8_t self_ok[kTiles];
 // 10,000 pairs, so the tables are rebuilt when something is about to read
 // them rather than every time a knob twitches. A knob moves at the block
@@ -65,6 +80,10 @@ int32_t seq = 0;
 bool  sounding[kVoices];
 float started_at[kVoices];
 int   flash[kVoices];
+// Set when a break is DELIVERED, not when it is scheduled: the LED stutters
+// at the moment the sound changes. Separate from flash[], which voices::
+// Control consumes for the gesture.
+bool  broke = false;
 
 // A change the wave carries. -1 means the field is not part of it.
 struct Change
@@ -124,14 +143,36 @@ float ChargedFb(int group)
     for(int v = 0; v < kVoices; v++)
         if(sounding[v])
             gl[GroupOf(v)] += FL[TileF(shown_tile[v])];
-    const float load = fmaxf(gl[0], gl[1]);
+    float load = 0.0f;
+    for(int g = 0; g < kGroups; g++)
+        load = fmaxf(load, gl[g]);
     // Capped so the quietest tile always passes every per-tile rule: an empty
     // table makes RandomTile() fall back to kDefaultTile, which is louder.
     const float cap = 0.98f
                       * fminf(fminf(limits.Fself / FL[0],
-                                    limits.Fpair / (2 * FL[0])),
+                                    limits.Fshare / FL[0]),
                               limits.Lpeak / FL[0]);
     return fmaxf(fm, fminf(fm * (1.0f + kChargeGain * load / kGroupSize), cap));
+}
+
+// A voice's delay as a multiple of the base time, skew included. The rule
+// reads this rather than the class alone, so a skewed voice is judged by the
+// time it actually echoes at.
+float ShownDly(int v)
+{
+    return DR[TileD(shown_tile[v])] * (shown_skew[v] ? kSkew : 1.0f);
+}
+
+// The ensemble budgets, floored at the matching per-voice limit so a single
+// sounding voice is governed by its own rule and nothing stricter. At two
+// voices these are exactly the pair sums they replaced.
+float FbBudget(int n)
+{
+    return fmaxf(limits.Fself, limits.Fshare * (float)n);
+}
+float DrBudget(int n)
+{
+    return fmaxf(limits.Rself, limits.Dshare * (float)n);
 }
 
 // The charge is fixed for a whole solve (shown_tile cannot move mid-solve), and
@@ -164,16 +205,6 @@ inline bool InList(const int* a, int n, int v)
 }
 
 // ---------------------------------------------------------------- the rules
-
-bool OkRatio(float a, float b)
-{
-    const float r       = (a > b ? a : b) / (a > b ? b : a);
-    const float want[4] = {4.0f / 3, 3.0f / 2, 2.0f, 3.0f};
-    for(int i = 0; i < 4; i++)
-        if(fabsf(r - want[i]) < 0.01f)
-            return true;
-    return false;
-}
 
 // `in_amt` is the cable depth arriving at this voice, which only counts in
 // How much cable is arriving at each sounding voice, as a sum of amounts.
@@ -324,16 +355,15 @@ bool Ac(uint8_t dom[kVoices][kTiles], const int* nodes, int n)
     {
         const int c = q[--qn];
         in_q[c]     = false;
-        uint8_t allow[kTiles];
-        memset(allow, 0, sizeof(allow));
+        uint8_t have[kDelays] = {}, allow[kDelays] = {};
         for(int t = 0; t < kTiles; t++)
             if(dom[c][t])
-            {
-                const uint8_t* row = compat + t * kTiles;
-                for(int u = 0; u < kTiles; u++)
-                    if(row[u])
+                have[TileD(t)] = 1;
+        for(int d = 0; d < kDelays; d++)
+            if(have[d])
+                for(int u = 0; u < kDelays; u++)
+                    if(compat[d * kDelays + u])
                         allow[u] = 1;
-            }
         for(int i = 0; i < n; i++)
         {
             const int o = nodes[i];
@@ -343,7 +373,7 @@ bool Ac(uint8_t dom[kVoices][kTiles], const int* nodes, int n)
             for(int u = 0; u < kTiles; u++)
                 if(dom[o][u])
                 {
-                    if(!allow[u])
+                    if(!allow[TileD(u)])
                     {
                         dom[o][u] = 0;
                         changed   = true;
@@ -402,6 +432,27 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
         for(int v = 0; v < kVoices; v++)
             out[v] = -1;
         int skipped = 0;
+        // The ensemble budgets, spent as voices are placed. Each candidate
+        // must leave room for every voice not yet placed to sit at the floor,
+        // so greedy collapse can never dead-end on the budget.
+        const float fmul = solve_fm, dmul = DrvMul();
+        // Spent against a slightly smaller budget than Diagnose checks: the
+        // feedback charge is frozen for the solve but rises with the load the
+        // solve itself creates, so a solve filled to the brim reads as broken
+        // the moment it lands. 5% covers the charge's step at seven voices.
+        float       fleft = FbBudget(n) * 0.95f, dleft = DrBudget(n);
+        if(fixed_v >= 0)
+        {
+            fleft -= FL[TileF(fixed_t)] * fmul;
+            dleft -= RL[TileR(fixed_t)] * dmul;
+            // A pinned tile that eats the whole budget is the pinned tile's
+            // fault, so say so and let the caller roll a different one rather
+            // than settle everyone else around it and still be broken.
+            const float floor_n = (float)(n - 1);
+            if(fleft < FL[0] * fmul * floor_n
+               || dleft < RL[0] * dmul * floor_n)
+                return -1;
+        }
         for(int i = 0; i < n; i++)
         {
             const int node = order[i];
@@ -410,6 +461,12 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
                 out[node] = fixed_t;
                 continue;
             }
+            int rest = 0;
+            for(int k = i + 1; k < n; k++)
+                if(order[k] != fixed_v)
+                    rest++;
+            const float fhold = FL[0] * fmul * (float)rest,
+                        dhold = RL[0] * dmul * (float)rest;
             // Candidates, cheapest first. The tile it already has wins
             // outright; the rest are ranked by distance plus a little jitter,
             // which is what keeps repeated repairs from being identical.
@@ -418,7 +475,9 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
             float     cost[kTiles];
             int       nc = 0;
             for(int t = 0; t < kTiles; t++)
-                if(dom[node][t])
+                if(dom[node][t]
+                   && FL[TileF(t)] * fmul + fhold <= fleft
+                   && RL[TileR(t)] * dmul + dhold <= dleft)
                 {
                     cand[nc] = t;
                     cost[nc] = t == cur
@@ -447,14 +506,22 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
                 {
                     out[node] = cand[c];
                     done      = true;
+                    fleft -= FL[TileF(cand[c])] * fmul;
+                    dleft -= RL[TileR(cand[c])] * dmul;
                 }
                 else
                     memcpy(dom, snap, sizeof(dom));
             }
             // Nothing legal for this voice: leave out[node] at -1 so it keeps
-            // the tile it has, and carry on settling the others
+            // the tile it has, and carry on settling the others. It still
+            // spends what that tile costs, or the voices after it would be
+            // handed budget this one is already using.
             if(!done)
+            {
                 skipped++;
+                fleft -= FL[TileF(cur)] * fmul;
+                dleft -= RL[TileR(cur)] * dmul;
+            }
         }
         // A full settle is worth another roll of the jitter; a partial one is
         // only reported once the attempts are spent.
@@ -465,118 +532,86 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
 }
 
 // The cable layer: pin the new cable, then take the smallest change to the
-// others' cables that still satisfies rule 4. Exhaustive over 13^3 at most,
-// so the recursion carries its state in statics rather than a closure.
-bool       rp_found;
-float      rp_best_cost;
-int8_t     rp_best[kVoices], rp_trial[kVoices];
-const int* rp_act;
-int        rp_n;
-int        rp_others[kVoices], rp_n_others;
-
-void RpRec(int i)
-{
-    if(i == rp_n_others)
-    {
-        if(!PatchesOK(rp_trial, rp_act, rp_n, rp_tiles))
-            return;
-        float c = Rand() * kWild * 2;
-        for(int j = 0; j < rp_n_others; j++)
-            if(rp_trial[rp_others[j]] != patch[rp_others[j]])
-                c += 10.0f;
-        if(c < rp_best_cost)
-        {
-            rp_best_cost = c;
-            memcpy(rp_best, rp_trial, sizeof(rp_trial));
-            rp_found = true;
-        }
-        return;
-    }
-    const int n = rp_others[i];
-    for(int o = 0; o < kOpts; o++)
-    {
-        // Cables never cross groups
-        if(o && (OptTarget(o) == n || GroupOf(OptTarget(o)) != GroupOf(n)))
-            continue;
-        rp_trial[n] = (int8_t)o;
-        RpRec(i + 1);
-    }
-    rp_trial[n] = patch[n];
-}
-
+// others' cables that still satisfies rule 4.
+//
+// This was exhaustive, and it was only ever tractable because cables could
+// not cross groups: three voices to a group capped it at a few dozen
+// leaves. One cluster of seven removes that cap -- 19 options over 6 other
+// voices is 47 million leaves, each one a PatchesOK, which hangs outright.
+// So it is a widening search instead: leave everything alone if that is
+// already legal, then try moving one voice, then re-roll the lot a few
+// times. Same preference for the smallest change, bounded work.
 bool RepairPatches(const int* act, int n, int fixed_v, int fixed_opt,
                    const int* tiles, int8_t* out)
 {
-    rp_tiles    = tiles;
-    rp_n_others = 0;
+    int8_t trial[kVoices];
+    memcpy(trial, patch, sizeof(trial));
+    if(fixed_v >= 0)
+        trial[fixed_v] = (int8_t)fixed_opt;
+    rp_tiles = tiles;
+
+    int others[kVoices], n_others = 0;
     for(int i = 0; i < n; i++)
         if(act[i] != fixed_v)
-            rp_others[rp_n_others++] = act[i];
-    memcpy(rp_trial, patch, sizeof(rp_trial));
-    if(fixed_v >= 0)
-        rp_trial[fixed_v] = (int8_t)fixed_opt;
-    rp_act       = act;
-    rp_n         = n;
-    rp_found     = false;
-    rp_best_cost = 1e30f;
-    RpRec(0);
-    if(rp_found)
-        memcpy(out, rp_best, sizeof(rp_best));
-    return rp_found;
-}
+            others[n_others++] = act[i];
 
-// The mod layer. Nothing constrains depth, so the search is free: it walks
-// kModOpts^(n-1) and takes the configuration that changes fewest voices.
-bool       rm_found;
-float      rm_best_cost;
-int8_t     rm_best[kVoices], rm_trial[kVoices];
-int        rm_others[kVoices], rm_n_others;
-const int* rm_tiles;
-
-void RmRec(int i)
-{
-    if(i == rm_n_others)
+    // Nothing to do, which is the usual case
+    if(PatchesOK(trial, act, n, tiles))
     {
-        float c = Rand() * kWild * 2;
-        for(int j = 0; j < rm_n_others; j++)
-            if(rm_trial[rm_others[j]] != mod_opt[rm_others[j]])
-                c += 10.0f;
-        if(c < rm_best_cost)
+        memcpy(out, trial, sizeof(trial));
+        return true;
+    }
+
+    // One voice moved, cheapest first by construction
+    for(int j = 0; j < n_others; j++)
+    {
+        const int   v    = others[j];
+        const int8_t was = trial[v];
+        for(int o = 0; o < kOpts; o++)
         {
-            rm_best_cost = c;
-            memcpy(rm_best, rm_trial, sizeof(rm_trial));
-            rm_found = true;
+            if(o && OptTarget(o) == v)
+                continue;
+            trial[v] = (int8_t)o;
+            if(PatchesOK(trial, act, n, tiles))
+            {
+                memcpy(out, trial, sizeof(trial));
+                return true;
+            }
         }
-        return;
+        trial[v] = was;
     }
-    const int n = rm_others[i];
-    for(int o = 0; o < kModOpts; o++)
+
+    // Then whole configurations at random, which is what the exhaustive
+    // walk would have found eventually
+    for(int t = 0; t < 64; t++)
     {
-        rm_trial[n] = (int8_t)o;
-        RmRec(i + 1);
+        for(int j = 0; j < n_others; j++)
+        {
+            const int v = others[j];
+            int       o = RandInt(kOpts);
+            if(o && OptTarget(o) == v)
+                o = 0;
+            trial[v] = (int8_t)o;
+        }
+        if(PatchesOK(trial, act, n, tiles))
+        {
+            memcpy(out, trial, sizeof(trial));
+            return true;
+        }
     }
-    rm_trial[n] = mod_opt[n];
+    return false;
 }
 
 bool RepairMod(const int* act, int n, int fixed_v, int fixed_opt,
                const int* tl, int8_t* out)
 {
-    rm_n_others = 0;
-    for(int i = 0; i < n; i++)
-        if(act[i] != fixed_v)
-            rm_others[rm_n_others++] = act[i];
-    memcpy(rm_trial, mod_opt, sizeof(rm_trial));
+    (void)act;
+    (void)n;
+    (void)tl;
+    memcpy(out, mod_opt, sizeof(int8_t) * kVoices);
     if(fixed_v >= 0)
-    {
-        rm_trial[fixed_v] = (int8_t)fixed_opt;
-    }
-    rm_tiles     = tl;
-    rm_found     = false;
-    rm_best_cost = 1e30f;
-    RmRec(0);
-    if(rm_found)
-        memcpy(out, rm_best, sizeof(rm_best));
-    return rm_found;
+        out[fixed_v] = (int8_t)fixed_opt;
+    return true;
 }
 
 // ---------------------------------------------------------------- the wave
@@ -684,6 +719,12 @@ int RandomModOpt()
 // ---------------------------------------------------------------- the knobs
 
 Knobs&        K() { return knob; }
+bool          TookBreak()
+{
+    const bool was = broke;
+    broke          = false;
+    return was;
+}
 void          SetFrozen(bool on) { frozen = on; }
 void          SetCableMode(int m) { cable_mode = m; }
 int           CableMode() { return cable_mode; }
@@ -695,7 +736,17 @@ float ChargeMul() { return ChargedFb(0) / FbMul(); }
 
 float DelayBase() { return 0.03f * powf(30.0f, knob.delay); }
 float DelayGlide() { return Clamp(DelayBase() * 0.6f, 0.02f, 0.5f); }
-float HopSeconds() { return Clamp(DelayBase() * 0.8f, 0.03f, 1.0f); }
+// 20 ms is one event to the ear, 800 ms is a procession you can count
+float HopSeconds() { return Lerp(0.02f, 0.8f, ripple); }
+// Below this a break stays in the group that caused it
+constexpr float kSpread = 0.45f;
+void  SetRipple(float r) { ripple = Clamp(r, 0.0f, 1.0f); }
+void  SetLevel(int v, float l)
+{
+    if(v >= 0 && v < kVoices)
+        level[v] = l;
+}
+float Ripple() { return ripple; }
 // The release outlasts the attack by more than the prototype had it: the
 // voices were cutting off before their own echoes.
 float ReleaseT() { return Clamp(DelayBase() * 6.5f, 0.45f, 6.5f); }
@@ -735,9 +786,16 @@ const char* BreakName(BreakType t)
 void RebuildRules()
 {
     const float s   = knob.safe;
-    limits.Fpair    = 3.2f - 2.0f * s;
-    limits.Dpair    = 3.0f - 1.8f * s;
+    // Halved from the old pair sums so two sounding voices behave exactly as
+    // they did; above two, the budget grows with the ensemble instead of
+    // pinning every extra voice to the floor.
+    limits.Fshare   = (3.2f - 2.0f * s) * 0.5f;
+    limits.Dshare   = (3.0f - 1.8f * s) * 0.5f;
     limits.Fself    = s > 0.6f ? 0.95f : 9.0f;
+    // Drive's own ceiling, the twin of Fself. Without it the top drive class
+    // sits under any ensemble budget on its own, so a fuzz break had nothing
+    // to violate once the pair rule went.
+    limits.Rself    = s > 0.6f ? 0.7f : 9.0f;
     limits.ratio_on = s > 0.3f;
     limits.cycle_on = s > 0.35f;
     limits.Lpeak    = s > 0.6f ? 0.98f : (s > 0.3f ? 1.2f : 9.0f);
@@ -762,21 +820,33 @@ void EnsureTables()
     const float fm = solve_fm, dm = DrvMul(), base = DelayBase();
     table_fm       = fm;
     for(int t = 0; t < kTiles; t++)
-        self_ok[t] = FL[TileF(t)] * fm <= limits.Fself ? 1 : 0;
-    for(int a = 0; a < kTiles; a++)
-        for(int b = 0; b < kTiles; b++)
+        self_ok[t] = FL[TileF(t)] * fm <= limits.Fself
+                             && RL[TileR(t)] * dm <= limits.Rself
+                         ? 1
+                         : 0;
+    // Only the echo rule is left here, and it reads nothing but the delay
+    // class, so the table is one entry per PAIR OF CLASSES rather than per
+    // pair of tiles: 49 instead of 19,600, on a path arc consistency walks
+    // thousands of times per solve. Feedback and drive are ensemble budgets
+    // now, spent down as voices collapse, because a budget is n-ary and arc
+    // consistency over pairs is blind to it.
+    for(int a = 0; a < kDelays; a++)
+        for(int b = 0; b < kDelays; b++)
         {
-            bool ok = (FL[TileF(a)] + FL[TileF(b)]) * fm <= limits.Fpair
-                      && (RL[TileR(a)] + RL[TileR(b)]) * dm <= limits.Dpair;
-            // Echoes must be a simple ratio apart, and far enough apart in
-            // time to be heard as separate. The second half is why turning
-            // Delay down causes echo breaks with several voices sounding.
+            bool ok = true;
+            // Echoes are either the same echo or two you can tell apart --
+            // a near miss is the mud. DR is a 1/6 grid, so every pair is
+            // already rhythmically related and only audibility is left to
+            // check; demanding a SIMPLE ratio of every pair was the old
+            // four-voice encoding and no set of more than four can satisfy
+            // it. This is why turning Delay down with several voices
+            // sounding causes echo breaks.
             if(ok && limits.ratio_on)
-                ok = TileD(a) != TileD(b)
-                     && OkRatio(DR[TileD(a)], DR[TileD(b)])
-                     && fabsf(DR[TileD(a)] - DR[TileD(b)]) * base
-                            >= limits.gap;
-            compat[a * kTiles + b] = ok ? 1 : 0;
+            {
+                const float d = fabsf(DR[a] - DR[b]);
+                ok            = d < 1e-6f || d * base >= limits.gap;
+            }
+            compat[a * kDelays + b] = ok ? 1 : 0;
         }
 }
 }  // namespace
@@ -804,6 +874,7 @@ void Init(uint32_t seed)
         flash[v]                                              = 0;
     }
     seq       = 0;
+    broke     = false;
     n_events  = 0;
     n_dropped = 0;
     for(int g = 0; g < kGroups; g++)
@@ -1008,7 +1079,7 @@ void Heal(float now)
         Heal(g, now);
 }
 
-void BreakRule(int type, int g, float offset, float now)
+void BreakRule(int type, int g, float offset, float now, int prefer)
 {
     if(g < 0 || g >= kGroups)
         return;
@@ -1039,7 +1110,37 @@ void BreakRule(int type, int g, float offset, float now)
     memcpy(order, act, sizeof(int) * n);
     Recency(order, n);
 
-    const int a = act[RandInt(n)];
+    // Whoever asked for the break names the voice it should land on -- a
+    // leaned-on pad breaks itself. Failing that, weight the choice by how
+    // loudly each voice is actually sounding: measured over 8 seeds, a flat
+    // random pick left the weakest break changing nothing audible at all,
+    // because it landed on a voice that was barely there.
+    // ONE draw, reused as both the flat index and the weighted position:
+    // an extra Rand() here shifts the whole stream, which moved every
+    // measured number by 40% and made before-and-after meaningless.
+    const float u = Rand();
+    int         a = act[(int)(u * (float)n) % n];
+    if(prefer >= 0 && InList(act, n, prefer))
+        a = prefer;
+    else
+    {
+        float tot = 0.0f;
+        for(int i = 0; i < n; i++)
+            tot += level[act[i]];
+        if(tot > 1e-6f)
+        {
+            float r = u * tot;
+            for(int i = 0; i < n; i++)
+            {
+                r -= level[act[i]];
+                if(r <= 0.0f)
+                {
+                    a = act[i];
+                    break;
+                }
+            }
+        }
+    }
     int       b = -1;
     for(int i = 0; i < n; i++)
         if(act[i] != a)
@@ -1054,7 +1155,7 @@ void BreakRule(int type, int g, float offset, float now)
     const int ta = tile[a], tb = b >= 0 ? tile[b] : 0;
     switch(type)
     {
-        case kEcho:   // the delay off its pitch, clashing with a neighbour
+        case kEcho:   // two echoes a few milliseconds apart, flamming
             ch[a].skew = 1;
             ch[a].tile
                 = MkTile(TileD(ta), TileF(ta) > 2 ? TileF(ta) : 2, TileR(ta));
@@ -1082,15 +1183,41 @@ void BreakRule(int type, int g, float offset, float now)
             ch[b].patch = 1 + a * 3 + 2;
             break;
     }
-    ApplyWave(ch, order, n, 2, offset, now);
+    // A break that lands on the tile the voice already holds changes
+    // nothing and is never delivered -- kFuzz on a tile that is already
+    // driven, kSwell on one already ringing. The player leans on the pad
+    // and hears silence, so force a real move instead.
+    if(ApplyWave(ch, order, n, 2, offset, now) == 0)
+    {
+        for(int i = 0; i < kVoices; i++)
+            ch[i] = NoChange();
+        int t = tile[a];
+        for(int i = 0; i < 8 && t == tile[a]; i++)
+            t = RandomTile();
+        ch[a].tile = t;
+        ApplyWave(ch, order, n, 2, offset, now);
+    }
     // WFC comes back for it, but not straight away
     heal_at[g] = now + offset + 3.0f + Rand() * 4.0f;
+
+    // Past half way the fader carries the break into the other group, one
+    // wave later, so the whole instrument chain-reacts instead of one
+    // cluster twitching. The guard stops the two groups breaking each
+    // other round and round.
+    static bool spreading = false;
+    if(ripple >= kSpread && !spreading && kGroups > 1)
+    {
+        spreading = true;
+        const float after = offset + (float)n * HopSeconds();
+        BreakRule(-1, g ^ 1, after, now, -1);
+        spreading = false;
+    }
 }
 
 void BreakRule(int type, float offset, float now)
 {
     for(int g = 0; g < kGroups; g++)
-        BreakRule(type, g, offset, now);
+        BreakRule(type, g, offset, now, -1);
 }
 
 void KnobsMoved(float now)
@@ -1133,6 +1260,8 @@ void Tick(float now)
         }
         if(e.kind > flash[e.v])
             flash[e.v] = e.kind;
+        if(e.kind == 2)
+            broke = true;
     }
     n_events = keep;
 
@@ -1197,6 +1326,8 @@ int Diagnose(Violation* out, int max, int group)
         const int a = act[i], t = shown_tile[a];
         if(FL[TileF(t)] * fm > limits.Fself)
             out[cnt++] = Violation{kSwell, {a, -1}};
+        if(RL[TileR(t)] * dm > limits.Rself && cnt < max)
+            out[cnt++] = Violation{kFuzz, {a, -1}};
         if(limits.ratio_on && shown_skew[a] && cnt < max)
             out[cnt++] = Violation{kEcho, {a, -1}};
         // Rule 7: fed and ringing at once, which only feed can be
@@ -1205,21 +1336,45 @@ int Diagnose(Violation* out, int max, int group)
                || in_deg[a] > limits.fan_in))
             out[cnt++] = Violation{kFlood, {a, -1}};
     }
+    // The ensemble budgets. Blamed on the two biggest spenders, so a heal
+    // has somewhere obvious to take the energy from.
+    {
+        float fsum = 0.0f, dsum = 0.0f;
+        int   f1 = -1, f2 = -1, d1 = -1, d2 = -1;
+        for(int i = 0; i < n; i++)
+        {
+            const int   a = act[i], t = shown_tile[a];
+            const float fv = FL[TileF(t)] * fm, dv = RL[TileR(t)] * dm;
+            fsum += fv;
+            dsum += dv;
+            if(f1 < 0 || fv > FL[TileF(shown_tile[f1])] * fm)
+            {
+                f2 = f1;
+                f1 = a;
+            }
+            else if(f2 < 0 || fv > FL[TileF(shown_tile[f2])] * fm)
+                f2 = a;
+            if(d1 < 0 || dv > RL[TileR(shown_tile[d1])] * dm)
+            {
+                d2 = d1;
+                d1 = a;
+            }
+            else if(d2 < 0 || dv > RL[TileR(shown_tile[d2])] * dm)
+                d2 = a;
+        }
+        if(n && fsum > FbBudget(n) && cnt < max)
+            out[cnt++] = Violation{kSwell, {f1, f2, -1}};
+        if(n && dsum > DrBudget(n) && cnt < max)
+            out[cnt++] = Violation{kFuzz, {d1, d2, -1}};
+    }
     for(int i = 0; i < n; i++)
         for(int j = i + 1; j < n && cnt < max; j++)
         {
             const int a = act[i], b = act[j];
             const int ta = shown_tile[a], tb = shown_tile[b];
-            if((FL[TileF(ta)] + FL[TileF(tb)]) * fm > limits.Fpair)
-                out[cnt++] = Violation{kSwell, {a, b, -1}};
-            if((RL[TileR(ta)] + RL[TileR(tb)]) * dm > limits.Dpair
-               && cnt < max)
-                out[cnt++] = Violation{kFuzz, {a, b, -1}};
-            if(limits.ratio_on && cnt < max
-               && (TileD(ta) == TileD(tb)
-                   || !OkRatio(DR[TileD(ta)], DR[TileD(tb)])
-                   || fabsf(DR[TileD(ta)] - DR[TileD(tb)]) * base
-                          < limits.gap))
+            const float dd = fabsf(DR[TileD(ta)] - DR[TileD(tb)]);
+            if(limits.ratio_on && cnt < max && dd >= 1e-6f
+               && dd * base < limits.gap)
                 out[cnt++] = Violation{kEcho, {a, b, -1}};
         }
     if(limits.cycle_on)

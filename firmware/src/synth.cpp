@@ -15,20 +15,37 @@ namespace synth
 {
 namespace
 {
-// Two just minor triads a SIXTH apart (1, 6/5, 3/2 and 5/3, 2, 5/2). Not a
-// fifth: the triad itself spans a fifth, so transposing by one put the right
-// group's root on the left group's top note and P06 and P08 played a unison.
-// Index 2 is the connector and never read for pitch.
-const int kRatN[kPads] = {1, 6, 0, 5, 2, 3, 5};
-const int kRatD[kPads] = {1, 5, 1, 3, 1, 2, 2};
+// One just minor triad and its octaves, ascending across the pads: the
+// two-group tuning put the groups a sixth apart, which has no meaning with
+// one cluster. Spread over two octaves rather than packed into one -- seven
+// voices all sound at once now, and at 220 Hz a critical band is only 48 Hz
+// wide, so a close scale would simply mud up. The tightest neighbouring
+// pair here is 220/264, which is what the instrument already had.
+const int kRatN[kPads] = {1, 6, 3, 2, 12, 3, 4};
+const int kRatD[kPads] = {1, 5, 2, 1, 5, 1, 1};
 constexpr int kRoot = 9;   // A
+
+// Leaning on a held pad breaks its group's rules. A lean is an INCREASE,
+// not a level: how hard a finger rests varies with the finger and the pad,
+// and an absolute threshold that an ordinary hold already sits above can
+// never re-arm without letting go. So each pad tracks its own resting
+// force and the gesture is a rise above that -- slowly up, quickly down,
+// so a deliberate push stands out and easing off re-arms at once.
+constexpr float kLean    = 0.25f;   // rise over resting that counts
+constexpr float kFloor   = 0.3f;    // below this it is a brush, not a lean
+constexpr float kRestUp  = 0.8f;    // seconds for rest to absorb a push
+constexpr float kRestDn  = 0.15f;   // and to follow a finger easing off
+float           pressure[kPads] = {};
+float           rest[kPads]     = {};
+float           rest_at[kPads]  = {};
+bool            armed[kPads]    = {};
 
 bool  held[kPads];
 // The octave a pad was pressed at. A pad keeps the pitch it was triggered
 // with until it is released, so shifting the octave leaves what is sounding
 // alone and only applies to the next press.
 float pad_hz[kPads];
-const int kPadVoice[kPads] = {0, 1, -1, 3, 4, 2, 5};
+const int kPadVoice[kPads] = {0, 1, 2, 3, 4, 5, 6};
 int   octave    = 0;
 int   gain_step = -4;   // -12 dB, safe for headphones
 float gain_lin  = 1.0f;
@@ -127,24 +144,7 @@ float Limit(float x)
 float now_s = 0.0f;
 
 bool  user_freeze = false;
-float agit_last   = -1.0f;
 
-void UpdateBridges()
-{
-    int a[wfc::kGroups];
-    for(int g = 0; g < wfc::kGroups; g++)
-    {
-        a[g] = -1;
-        for(int v = g * wfc::kGroupSize; v < (g + 1) * wfc::kGroupSize; v++)
-            if(wfc::Sounding(v) && (a[g] < 0 || wfc::StartedAt(v) > wfc::StartedAt(a[g])))
-                a[g] = v;
-    }
-    wfc::SetJoined(held[kConnectorPad], now_s);
-    const bool  on  = held[kConnectorPad] && a[0] >= 0 && a[1] >= 0;
-    const float amt = wfc::AMT[1];
-    voices::SetBridge(0, on ? a[0] : -1, on ? a[1] : -1, amt);
-    voices::SetBridge(1, on ? a[1] : -1, on ? a[0] : -1, amt);
-}
 
 // Pushes every pad's sounding state into WFC, which is what the rules read
 void SyncSounding(float now)
@@ -177,15 +177,17 @@ void Init(float sample_rate, int block_size)
     block = block_size;
     for(int p = 0; p < kPads; p++)
     {
-        held[p]   = false;
-        pad_hz[p] = 0.0f;
+        held[p]     = false;
+        pad_hz[p]   = 0.0f;
+        pressure[p] = 0.0f;
+        rest[p]     = -1.0f;
+        rest_at[p]  = 0.0f;
+        armed[p]    = true;
     }
     octave         = 0;
-    voices::SetHoldMask(3);
     wfc::K().hold = 0.0f;
     now_s          = 0.0f;
     user_freeze = false;
-    agit_last   = -1.0f;
     ShiftGain(0);
 
     memset(comb_buf, 0, sizeof(comb_buf));
@@ -213,7 +215,50 @@ float PadHz(int p)
 
 int  PadVoice(int p) { return kPadVoice[p]; }
 bool PadOn(int p) { return held[p]; }
-bool Joined() { return held[kConnectorPad]; }
+
+void SetPressure(int pad, float p)
+{
+    if(pad < 0 || pad >= kPads)
+        return;
+    pressure[pad] = p;
+    // A fresh press has no resting force yet, so seed it rather than read a
+    // rise from zero and break on every single press
+    if(rest[pad] < 0.0f)
+    {
+        rest[pad]    = p;
+        rest_at[pad] = now_s;
+        return;
+    }
+    const float lean = p - rest[pad];
+    if(lean < kLean * 0.4f)
+        armed[pad] = true;
+    else if(lean >= kLean && p >= kFloor && armed[pad] && held[pad])
+    {
+        armed[pad] = false;
+        const int v = kPadVoice[pad];
+        if(v >= 0)
+            wfc::BreakRule(-1, v / wfc::kGroupSize, 0.0f, now_s, v);
+    }
+    // After the test, so the push that fires is measured against where the
+    // finger was, not against itself. The panel polls each pad every 28 ms
+    // and the desktop every block, hence a time constant and not a rate.
+    const float dt = now_s - rest_at[pad];
+    rest_at[pad]   = now_s;
+    if(dt > 0.0f)
+        rest[pad] += (p - rest[pad])
+                     * (1.0f - expf(-dt / (p > rest[pad] ? kRestUp
+                                                         : kRestDn)));
+}
+
+float PressureRest(int pad)
+{
+    return (pad >= 0 && pad < kPads && rest[pad] > 0.0f) ? rest[pad] : 0.0f;
+}
+
+float Pressure(int pad)
+{
+    return (pad >= 0 && pad < kPads) ? pressure[pad] : 0.0f;
+}
 
 void Press(int pad)
 {
@@ -224,24 +269,24 @@ void Press(int pad)
     const int v = kPadVoice[pad];
     if(v < 0)
     {
-        UpdateBridges();
         return;
     }
     voices::SetPitch(v, PadHz(pad), true);
     wfc::SetSounding(v, true, now_s);
     SyncSounding(now_s);
     wfc::Pass(v, now_s);
-    UpdateBridges();
 }
 
 void Release(int pad)
 {
-    held[pad] = false;
+    held[pad]     = false;
+    pressure[pad] = 0.0f;
+    rest[pad]     = -1.0f;   // reseed on the next press
+    armed[pad]    = true;
     SyncSounding(now_s);
     const int v = kPadVoice[pad];
     if(v >= 0)
         wfc::RerollTail(v, now_s);
-    UpdateBridges();
 }
 
 bool ShiftOctave(int delta)
@@ -315,8 +360,9 @@ void Control(float now)
         }
     SyncSounding(now);
     wfc::Tick(now);
-    UpdateBridges();
     voices::Control(now, (float)block / sr);
+    for(int v = 0; v < wfc::kVoices; v++)
+        wfc::SetLevel(v, voices::BusLvl(v));
 }
 
 float InputMix() { return in_mix; }
@@ -403,18 +449,7 @@ const char* CableName(int m) { return voices::CableName(m); }
 
 void Break() { wfc::BreakRule(-1, 0.0f, now_s); }
 void Settle() { wfc::Heal(now_s); }
-// Same deadband as SetKnob, against the fader's own value rather than a
-// struct field, because this one writes two
-void SetAgitation(float a)
-{
-    if(fabsf(agit_last - a) < 0.004f)
-        return;
-    agit_last = a;
-    wfc::SetAgitation(a);
-    wfc::KnobsMoved(now_s);
-}
 
-void SetHoldTarget(int pos) { voices::SetHoldMask(pos > 0 ? 1 : pos < 0 ? 2 : 3); }
 void Freeze(bool on)
 {
     user_freeze = on;
@@ -423,5 +458,6 @@ void Freeze(bool on)
 bool Frozen() { return wfc::Frozen(); }
 
 float Level() { return voices::Level(); }
+bool  TookBreak() { return wfc::TookBreak(); }
 
 }  // namespace synth

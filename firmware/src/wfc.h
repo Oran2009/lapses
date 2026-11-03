@@ -16,20 +16,35 @@
 
 namespace wfc
 {
-constexpr int kVoices    = 6;
-constexpr int kGroups    = 2;
+// One voice per playable pad, and one cluster. The two-group split and its
+// connector pad bought less than the complexity they cost: a bridge whose
+// effect was never immediate, and voice stealing to hide six voices behind
+// seven pads. kGroups survives at 1 so the solver's per-group bookkeeping
+// still reads naturally; GroupOf is 0 for everything.
+constexpr int kVoices    = 7;
+constexpr int kGroups    = 1;
 constexpr int kGroupSize = kVoices / kGroups;
 inline int    GroupOf(int v) { return v / kGroupSize; }
 constexpr int kPads   = 7;
 
-// Delay time classes, as multiples of the base time
-constexpr float DR[5] = {1.0f, 4.0f / 3, 3.0f / 2, 2.0f, 3.0f};
+// Delay time classes, as multiples of the base time. All seven sit on a
+// common 1/6 grid (6, 8, 9, 12, 15, 18, 24 sixths), which is what makes any
+// set of them rhythmically related and lets rule 3 ask only whether two
+// echoes are far enough apart to hear separately.
+constexpr int   kDelays = 7;
+constexpr float DR[kDelays]
+    = {1.0f, 4.0f / 3, 3.0f / 2, 2.0f, 5.0f / 2, 3.0f, 4.0f};
+// What a broken delay is multiplied by. Small on purpose: the echo break's
+// job is to land a voice just INSIDE the gap from another one, so the two
+// echoes flam against each other. It was 1.19, which at the default base is
+// 44 ms -- past the gap, so the break satisfied the rule it was breaking.
+constexpr float kSkew = 1.02f;
 // Feedback gain. Above 1 the loop rings by itself
 constexpr float FL[5] = {0.2f, 0.45f, 0.7f, 0.9f, 1.08f};
 // Drive
 constexpr float RL[4] = {0.05f, 0.3f, 0.6f, 1.0f};
-// 100 tiles: d * 20 + f * 4 + r
-constexpr int   kTiles = 5 * 5 * 4;
+// 140 tiles: d * 20 + f * 4 + r
+constexpr int   kTiles = kDelays * 5 * 4;
 
 // Cable strength, and 0 = no cable, else 1 + target * 3 + amount
 constexpr float AMT[3]  = {0.3f, 0.6f, 0.9f};
@@ -62,7 +77,11 @@ struct Knobs
 // What the rules allow at the current strictness (4.4)
 struct Limits
 {
-    float Fpair, Dpair, Fself, Lpeak, gap;
+    // Fshare/Dshare are each sounding voice's SHARE of the ensemble budget:
+    // the whole group may spend Fshare * n. A pairwise sum instead meant
+    // "no two voices both hot", which at seven voices is a cardinality
+    // constraint the pairwise solver cannot see.
+    float Fshare, Dshare, Fself, Rself, Lpeak, gap;
     bool  ratio_on, cycle_on;
     // The cable rules, which only exist while the cables are switched on
     float Iflood;        // feedback plus everything fed in, per voice
@@ -102,6 +121,13 @@ const Limits& Lim();
 float DelayBase();
 float DelayGlide();
 float HopSeconds();
+// S36: the gap between one voice of a wave changing and the next, and how
+// far the wave carries
+void  SetRipple(float r);
+// What voice v is putting on the bus, so a break can pick one that is
+// actually sounding. Pushed in once a block from the audio side.
+void  SetLevel(int v, float l);
+float Ripple();
 float ReleaseT();
 float AttackT();
 float ModSpeed0();
@@ -153,6 +179,8 @@ int  Skew(int v);
 // What the audio has reached: the wave arrives over time (4.6b). Audio reads
 // these, never the logical copy above.
 int  ShownTile(int v);
+// True once per delivered break, for the LED
+bool TookBreak();
 int  ShownPatch(int v);
 int  ShownMod(int v);
 int  ShownSkew(int v);
@@ -173,7 +201,8 @@ void Heal(float now);
 void Heal(int group, float now);
 // Let one rule go. type < 0 picks at random. (4.6)
 void BreakRule(int type, float offset, float now);
-void BreakRule(int type, int group, float offset, float now);
+// `prefer` names the voice the break should land on, -1 to pick one
+void BreakRule(int type, int group, float offset, float now, int prefer = -1);
 // A knob moved: the rules change now, the repair comes 350 ms after the last
 // movement, so the player hears the strain first.
 void KnobsMoved(float now);
@@ -187,6 +216,12 @@ int EventsDropped();
 // Which rules are broken right now, reading the SHOWN state. Returns the
 // count; `out` must hold at least kVoices * kVoices + kVoices entries. Each
 // group is judged with its own charge; group >= 0 judges only that one.
+// Every rule a seven-voice ensemble can break at once: three per voice, one
+// per pair, one cycle per voice, plus the two ensemble budgets. A buffer
+// shorter than this silently starves whatever Diagnose checks LAST, which
+// with four voices it never did and with seven it does.
+constexpr int kMaxViolations
+    = kVoices * 4 + kVoices * (kVoices - 1) / 2 + 2;
 int  Diagnose(Violation* out, int max, int group = -1);
 
 }  // namespace wfc

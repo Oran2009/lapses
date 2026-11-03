@@ -5,9 +5,11 @@
 // tuned against the real board -- libDaisy's defaults miss presses.
 //
 // Pads:   P03..P09 play, P00/P02 octave down/up, P10/P11 volume down/up
+//         A playing pad also reports contact force, and leaning on one
+//         breaks its group -- see synth::SetPressure
 // Knobs:  S30..S35 on ADC 0..5, faders S36/S37 on ADC 6,7
-// Switch: S07/S08 hold left/both/right, S09/S10 cross-mod/none/cross-feed
-// Spare:  P01
+// Switch: S09/S10 cross-mod/none/cross-feed; S07/S08 is unassigned
+// Spare:  P01, the S35 knob, the S36 fader and the S07/S08 switch
 //
 // The engine is not reentrant and a solve is most of an audio block, so the
 // whole control side -- this and synth::Control -- runs in the main loop.

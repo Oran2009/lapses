@@ -81,6 +81,11 @@ int   block     = 48;
 // the repeats thin out as they pile up.
 constexpr float kLoopHpHz = 150.0f;
 
+// How long a knob move takes to cross from the old tap to the new one.
+// Short enough to feel immediate, long enough that the two taps' phase
+// disagreement does not read as a click.
+constexpr float kXfadeT = 0.03f;
+
 // How long a broken delay takes to crawl to its new class. Long enough
 // that the tap movement reads as a pitch bend, not a glide. Reasoned,
 // not measured -- tune by ear.
@@ -91,10 +96,13 @@ constexpr float kSweepT = 1.2f;
 // line harder and takes seconds to be heard. These act on what each voice
 // actually sends out. Squared so the shadow is short -- fresh decays over
 // 2.5 s and a duck that long would pump on every press.
-// Measured 0.3 s after a press against three standing voices: the new voice
-// sits 2.25x above the others, and the wash dips 25%. More duck buys more
-// separation and a deeper dip -- 0.60/0.40 gives 2.5x and -34%.
-constexpr float kDuckOut = 0.45f;   // how far the others step back
+// Measured as P03's own output against the wash it lands in, 16 settled
+// seeds: worst case 1.63 with the old fixed 0.45 step, 2.12 with these.
+// Target down or floor down for more separation, at the cost of the wash
+// pumping harder on every press.
+constexpr float kWashTarget = 0.12f;   // the level the wash ducks TO
+constexpr float kDuckFloor  = 0.25f;   // and the deepest it may be ducked
+constexpr float kRoomCeil   = 0.55f;   // and the shallowest
 constexpr float kLiftOut = 2.0f;   // and how far the new one steps up
 constexpr float kRefHz   = 330.0f;   // the pitch at which that is unscaled
 float           loop_hp_c = 0.0f;
@@ -224,6 +232,8 @@ struct Voice
     float loop_hp, loop_hp2;   // the loop highpass's state, one per tap
     float vcut, vcut_t;
     float dly, dly_t;        // seconds
+    float dly_n;             // the tap a knob move is crossfading TO
+    float xf, xf_t;          // and how far through, at block start and end
     float fb, fb_t;
     float lcut, lcut_t;
     float pre, pre_t;
@@ -235,6 +245,7 @@ struct Voice
     float    fast, slow;       // the follower's two envelopes
     float    lvl_sum;          // |loop| over the last block
     int      lvl_n;
+    float    out_lvl;          // and the finished value, for the duck
     // What Process resolved for this block, kept for the display
     float    eff_dly, eff_fb, eff_pre, pan_now, depth_now;
     float    m_dly, m_dly_t;
@@ -347,10 +358,11 @@ void Init(float sample_rate, int block_size)
         vo.llp2.Reset();
         vo.vlp.Set(400.0f, 0.8f);
         vo.llp.Set(2000.0f, 0.5f);
-        vo.dly = vo.dly_t = 0.2f;
+        vo.dly = vo.dly_t = vo.dly_n = 0.2f;
+        vo.xf = vo.xf_t = 0.0f;
         vo.pre = vo.pre_t = 1.0f;
         vo.mspeed = vo.mspeed_t = 0.5f;
-        vo.fast = vo.slow = vo.lvl_sum = 0.0f;
+        vo.fast = vo.slow = vo.lvl_sum = vo.out_lvl = 0.0f;
         vo.lvl_n              = 0;
         for(int k = 0; k < kPartials; k++)
         {
@@ -460,6 +472,9 @@ float ModDepth(int i) { return v[i].depth_now; }
 float Pan(int i) { return v[i].pan_now; }
 float LoopLevel(int i) { return v[i].fast; }
 float OutGain(int i) { return v[i].outg; }
+// What this voice is actually putting on the bus, as the duck sees it
+float BusLvl(int i) { return v[i].out_lvl * v[i].wet * v[i].outg; }
+
 float DryLift(int i) { return v[i].dryl; }
 
 float Level()
@@ -471,14 +486,13 @@ float Level()
     return m;
 }
 
-int  hold_mask = 3;
-void SetHoldMask(int mask) { hold_mask = mask; }
 void SetPadHeld(int v, bool on) { pad_held[v] = on; }
 bool HoldSustains(int v)
 {
+    (void)v;
     // 0.02 is -34 dB, below which the floor is inaudible and should not pin
     // a voice into the constraint graph
-    return ((hold_mask >> (v / wfc::kGroupSize)) & 1) && wfc::K().hold > 0.02f;
+    return wfc::K().hold > 0.02f;
 }
 
 void Control(float now, float dt)
@@ -503,13 +517,29 @@ void Control(float now, float dt)
     // A press makes room for itself: the other voices' wash steps back for as
     // long as the new one is fresh. The feedback is untouched, so the rules
     // still ring exactly as WFC set them -- only the output tap ducks.
-    float duck[wfc::kVoices];
+    float duck[wfc::kVoices], room[wfc::kVoices];
     for(int i = 0; i < wfc::kVoices; i++)
     {
-        duck[i] = 0.0f;
+        duck[i]    = 0.0f;
+        float wash = 0.0f;
         for(int j = 0; j < wfc::kVoices; j++)
-            if(j != i && v[j].fresh > duck[i])
-                duck[i] = v[j].fresh;
+            if(j != i)
+            {
+                if(v[j].fresh > duck[i])
+                    duck[i] = v[j].fresh;
+                wash += v[j].out_lvl * v[j].wet;
+            }
+        // Duck the wash to a LEVEL, not by a fixed fraction. A new voice's
+        // own output hardly varies press to press (measured flat across 24
+        // tiles), but the wash it lands in roams over 10x, so a fixed step
+        // passed that spread straight through and the same pad read clear
+        // or muted depending on nothing the player did.
+        //
+        // The ceiling keeps it from ducking LESS than the old fixed step: a
+        // chord struck from silence has no wash yet, so a bare target would
+        // duck nothing and let six fresh voices stack into the limiter.
+        room[i] = Clamp(wash > 1e-6f ? kWashTarget / wash : 1.0f, kDuckFloor,
+                        kRoomCeil);
     }
 
     for(int i = 0; i < wfc::kVoices; i++)
@@ -520,9 +550,9 @@ void Control(float now, float dt)
         // The envelope, which follows the Delay knob: long echoes get a long
         // release so the loop is still fed while it rings
         {
-            // HOLD is a floor, not a longer release: the selected group sounds
-            // continuously at the knob's level and a pad press rides on top.
-            const bool  sel = (hold_mask >> (i / wfc::kGroupSize)) & 1;
+            // HOLD is a floor, not a longer release: every voice sounds
+            // continuously at the fader's level and a pad press rides on top.
+            const bool  sel = true;
             // The floor steps back for a fresh press, not just the wet tap:
             // otherwise five voices droning at the floor bury the one pad
             // you just pressed
@@ -573,7 +603,7 @@ void Control(float now, float dt)
         // A broken delay is no longer in tune with the voice's pitch; an
         // unbroken one is snapped to a whole number of its periods, which is
         // what makes the echoes reinforce instead of smear
-        const float t0 = base * D * M().dly_mul * (skew ? 1.19f : 1.0f);
+        const float t0 = base * D * M().dly_mul * (skew ? wfc::kSkew : 1.0f);
         float       d  = skew ? t0
                               : floorf(t0 * vo.hz + 0.5f) / vo.hz;
         if(!skew && d * vo.hz < 1.0f)
@@ -586,7 +616,7 @@ void Control(float now, float dt)
         vo.lcut_t = lcut * M().damp;
         vo.pre_t  = pre;
         vo.wet_t  = 0.8f * sqrtf(pre) * 0.7f;
-        vo.outg_t = 1.0f - kDuckOut * duck[i] * duck[i];
+        vo.outg_t = 1.0f - duck[i] * duck[i] * (1.0f - room[i]);
         // The lift goes on the DRY only. A new voice's loop has not filled
         // yet -- a low one least of all, since its delay is snapped to whole
         // periods -- so lifting its whole output lifts mostly silence. The
@@ -634,7 +664,34 @@ void Control(float now, float dt)
         if(sweeping)
             vo.sweep -= dt;
 
-        Approach(vo.dly, vo.dly_t, sweeping ? Coeff(kSweepT, dt) : co.dly);
+        // A break DRAGS the tap, and that scrub is the gesture. A knob move
+        // must not: sliding the read tap Dopplers everything already in the
+        // line, which is the scrubbing. So the knob crossfades to a second
+        // tap sitting at the new distance instead of travelling there.
+        vo.xf = vo.xf_t;
+        if(sweeping)
+        {
+            Approach(vo.dly, vo.dly_t, Coeff(kSweepT, dt));
+            vo.dly_n = vo.dly;
+            vo.xf = vo.xf_t = 0.0f;
+        }
+        else
+        {
+            if(vo.xf >= 1.0f)
+            {
+                vo.dly = vo.dly_n;
+                vo.xf = vo.xf_t = 0.0f;
+            }
+            if(vo.xf > 0.0f)
+                vo.xf_t = fminf(vo.xf + dt / kXfadeT, 1.0f);
+            // One fade at a time: a new target that lands mid-fade waits,
+            // which costs a block or two and keeps the taps click-free
+            else if(fabsf(vo.dly_t - vo.dly) > 1e-5f)
+            {
+                vo.dly_n = vo.dly_t;
+                vo.xf_t  = dt / kXfadeT;
+            }
+        }
         Approach(vo.fb, vo.fb_t, co.fb);
         Approach(vo.lcut, vo.lcut_t, co.lcut);
         Approach(vo.pre, vo.pre_t, co.pre);
@@ -664,6 +721,7 @@ void Control(float now, float dt)
         // ponytail: block-rate, ~1 ms steps. Fine for an envelope follower.
         // The cross-MODULATION cables are the per-sample path; see Process().
         const float lvl = vo.lvl_n ? vo.lvl_sum / (float)vo.lvl_n : 0.0f;
+        vo.out_lvl      = lvl;
         vo.lvl_sum      = 0.0f;
         vo.lvl_n        = 0;
         const float tau = 0.4f / (vo.mspeed > 0.05f ? vo.mspeed : 0.05f);
@@ -696,6 +754,8 @@ void Process(float* out_l, float* out_r, int n, const float* in,
     // across it, which is what makes the per-sample loop cheap
     float dsamp[wfc::kVoices], dsamp2[wfc::kVoices], fbg[wfc::kVoices],
         preg[wfc::kVoices], postg[wfc::kVoices];
+    // Only populated for a voice that is mid-crossfade
+    float dsampn[wfc::kVoices], xf[wfc::kVoices], xfi[wfc::kVoices];
     for(int i = 0; i < wfc::kVoices; i++)
     {
         Voice& vo = v[i];
@@ -707,6 +767,10 @@ void Process(float* out_l, float* out_r, int n, const float* in,
         // couple of milliseconds, so the loop reads as a wide source instead
         // of one panned point. It never feeds back -- the loop is unchanged.
         dsamp2[i] = Clamp(dsamp[i] * 1.013f, 2.0f, (float)(kDelayMax - 2));
+        xf[i]     = vo.xf;
+        xfi[i]    = n > 0 ? (vo.xf_t - vo.xf) / (float)n : 0.0f;
+        const float dn = (vo.dly_n + vo.mod * vo.m_dly) * sr;
+        dsampn[i]      = Clamp(dn, 2.0f, (float)(kDelayMax - 2));
         fbg[i]        = Clamp(vo.fb + vo.mod * vo.m_fb, 0.0f, 1.3f);
         preg[i]       = vo.pre + vo.mod * vo.m_pre;
         if(preg[i] < 0.01f)
@@ -715,7 +779,9 @@ void Process(float* out_l, float* out_r, int n, const float* in,
         // the loop's gain and not just its colour
         postg[i] = 1.0f / vo.pre;
 
-        vo.eff_dly = dsamp[i] * inv_sr;
+        // Mid-crossfade both taps sound; report the louder one, so the
+        // display still says what you are hearing
+        vo.eff_dly = (xf[i] > 0.5f ? dsampn[i] : dsamp[i]) * inv_sr;
         vo.eff_fb  = fbg[i];
         vo.eff_pre = preg[i];
     }
@@ -798,16 +864,45 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             const int   i0  = (vo.wr - di + kDelayMax) % kDelayMax;
             const int   i1  = (i0 - 1 + kDelayMax) % kDelayMax;
             const float out = vo.line[i0] + (vo.line[i1] - vo.line[i0]) * fr;
-            const int   dj  = (int)dsamp2[i];
-            const float fj  = dsamp2[i] - (float)dj;
-            const int   j0  = (vo.wr - dj + kDelayMax) % kDelayMax;
-            const int   j1  = (j0 - 1 + kDelayMax) % kDelayMax;
-            const float o2  = vo.line[j0] + (vo.line[j1] - vo.line[j0]) * fj;
+            float outm = out, o2;
+            if(xf[i] > 0.0f)
+            {
+                // Mid-crossfade the WIDE tap is dropped and both channels
+                // take the crossfaded one. Two reads either way, so turning
+                // the knob costs no extra memory traffic -- on the board the
+                // four reads this used to do saturated the audio callback.
+                // The image narrows for 30 ms, which is not audible.
+                const float ns = Clamp(dsampn[i] + dmod, 2.0f,
+                                       (float)(kDelayMax - 2));
+                const int   ni = (int)ns;
+                const float nf = ns - (float)ni;
+                const int   n0 = (vo.wr - ni + kDelayMax) % kDelayMax;
+                const int   n1 = (n0 - 1 + kDelayMax) % kDelayMax;
+                const float nv = vo.line[n0]
+                                 + (vo.line[n1] - vo.line[n0]) * nf;
+                // Equal power by square root, not by sin/cos: the two taps
+                // read uncorrelated parts of the line so a linear fade dips
+                // in the middle, but VSQRT is one instruction where sinf and
+                // cosf are a libm call each, twelve per sample across the
+                // voices. That is what broke the audio on the board.
+                const float x  = xf[i] > 1.0f ? 1.0f : xf[i];
+                outm           = out * sqrtf(1.0f - x) + nv * sqrtf(x);
+                o2             = outm;
+                xf[i] += xfi[i];
+            }
+            else
+            {
+                const int   dj = (int)dsamp2[i];
+                const float fj = dsamp2[i] - (float)dj;
+                const int   j0 = (vo.wr - dj + kDelayMax) % kDelayMax;
+                const int   j1 = (j0 - 1 + kDelayMax) % kDelayMax;
+                o2 = vo.line[j0] + (vo.line[j1] - vo.line[j0]) * fj;
+            }
 
             vo.wr           = (vo.wr + 1) % kDelayMax;
 
             // The loop's filters and its distortion
-            const float lp  = vo.llp.Process(out);
+            const float lp  = vo.llp.Process(outm);
             vo.loop_hp += (lp - vo.loop_hp) * loop_hp_c;
             const float f   = lp - vo.loop_hp;
             const float sh  = Shape(f * preg[i]);

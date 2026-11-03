@@ -30,6 +30,11 @@ namespace
 {
 constexpr int kSr    = 48000;
 constexpr int kBlock = 64;
+
+// The board reads contact force off the MPR121; a keyboard has none, so
+// Shift stands in for leaning on the pad. Held pads rest at a light touch.
+bool            hard_press = false;
+constexpr float kRestPress = 0.2f;
 // waveOut double buffering. Measured: with the window busy, this thread can
 // go unscheduled for ~36 ms at a time, and at 8 buffers (43 ms) the queue was
 // running dry -- which is what stuttered. 16 buffers is 85 ms, a margin a
@@ -105,6 +110,14 @@ void Fill(WAVEHDR* h)
             }
             // Holding the last sample is a dull moment; a zero is a click
             in[i] = in_ready ? in_last : 0.0f;
+        }
+        for(int p = 0; p < synth::kPads; p++)
+        {
+            const float tgt
+                = synth::PadOn(p) ? (hard_press ? 1.0f : kRestPress) : 0.0f;
+            const float cur = synth::Pressure(p);
+            // 0.12 a block matches the board's 0.40 every fourth block
+            synth::SetPressure(p, cur + (tgt - cur) * 0.12f);
         }
         synth::Control(Now());
         synth::Process(l, r, kBlock, hwi ? in : nullptr);
@@ -255,6 +268,7 @@ struct Rect
     int x, y, w, h;
 };
 Rect knob_r[synth::kKnobs], pad_r[synth::kPads];
+
 bool knob_vert[synth::kKnobs];
 // Panel pads with no voice: P00 oct down, P01 unmapped, P02 oct up, P10 vol
 // down, P11 vol up. Same order everywhere below.
@@ -267,7 +281,7 @@ const char  kXpKey[5]  = {'Z', 0, 'X', '-', '='};
 // Engine knob index -> the panel's name, so the window reads like the board
 const char* kKnobLabel[synth::kKnobs]
     = {"S32 delay", "S31 feedback", "S33 distortion", "S34 filter",
-       "S30 mod",   "S36 agitation", "",              "S37 HOLD"};
+       "S30 mod",   "", "",              "S37 HOLD"};
 
 // Panel replica on the left, cards and GUI-only controls to its right
 constexpr int kPx = 16, kPy = 16, kPW = 540, kPH = 908;
@@ -276,28 +290,28 @@ constexpr int kGuiY = 350;
 constexpr int kSwW = 140;
 // The panel switches, drawn and clicked as stacked cells, so they behave the
 // way the Touch 2's do rather than as keyboard toggles. Cell 0 is the top.
-// Pos() gives the -1 down / 0 centre / +1 up the engine expects, for the two
-// hardware switches. The third is the voice-model spike and exists only here.
-constexpr int kSwitches   = 4;
+// Pos() gives the -1 down / 0 centre / +1 up the engine expects for the one
+// hardware switch left. The second is the voice-model spike and the third
+// is freeze; both exist only here.
+constexpr int kSwitches   = 3;
 constexpr int kSwMaxCells = voices::kModels;
-const int     kSwCells[kSwitches] = {3, 3, voices::kModels, 2};
+const int     kSwCells[kSwitches] = {3, voices::kModels, 2};
 Rect          sw_r[kSwitches][kSwMaxCells];
-int           sw_cell[kSwitches] = {1, 1, 0, 0};
+int           sw_cell[kSwitches] = {1, 0, 0};
 
 inline int Pos(int k) { return 1 - sw_cell[k]; }
 
 const char* kSwLabel[kSwitches][kSwMaxCells]
-    = {{"hold left", "hold both", "hold right"},
-       {"cross-mod", "no cables", "cross-feed"},
+    = {{"cross-mod", "no cables", "cross-feed"},
        {},
        {"live", "freeze"}};
-const char* kSwName[kSwitches] = {"S07/S08 HOLD", "S09/S10 cables",
-                                  "voice model (V)", "freeze (C)"};
+const char* kSwName[kSwitches]
+    = {"S09/S10 cables", "voice model (V)", "freeze (C)"};
 
 // The model cells are named by the engine, so there is one list and not two
 const char* SwLabel(int k, int c)
 {
-    return k == 2 ? voices::ModelName(c) : kSwLabel[k][c];
+    return k == 1 ? voices::ModelName(c) : kSwLabel[k][c];
 }
 
 // Exactly what panel::Poll does with them, so there is one behaviour and not
@@ -305,10 +319,9 @@ const char* SwLabel(int k, int c)
 
 void ApplySwitches()
 {
-    synth::SetHoldTarget(Pos(0));
-    synth::Freeze(sw_cell[3]);
-    synth::SetCableMode(Pos(1) > 0   ? voices::kCableMod
-                        : Pos(1) < 0 ? voices::kCableFeed
+    synth::Freeze(sw_cell[2] != 0);
+    synth::SetCableMode(Pos(0) > 0   ? voices::kCableMod
+                        : Pos(0) < 0 ? voices::kCableFeed
                                      : voices::kCableOff);
     voices::SetModel(sw_cell[2]);
 }
@@ -326,10 +339,10 @@ void Layout()
         knob_vert[sp.k] = false;
     }
     const int fh = Y(.54f) - Y(.29f);
-    knob_r[5] = {X(.06f) - 18, Y(.29f), 36, fh};   // S36 agitation
+    knob_r[5] = {0, 0, 0, 0};   // S36 is unassigned
     knob_r[7] = {X(.94f) - 18, Y(.29f), 36, fh};   // S37 hold
     knob_r[6] = {0, 0, 0, 0};   // unrest has no control of its own now
-    knob_vert[5] = knob_vert[7] = true;
+    knob_vert[7] = true;
 
     // Engine pad order is P03 P04 P05 P06 P07 P08 P09
     static const float pf[synth::kPads][2] = {{.10f, .83f}, {.30f, .80f},
@@ -410,6 +423,7 @@ void TextC(HDC dc, int cx, int y, const char* s, COLORREF c)
     SetTextAlign(dc, TA_LEFT | TA_TOP);
 }
 
+
 void Box(HDC dc, Rect r, COLORREF c)
 {
     RECT b = {r.x, r.y, r.x + r.w, r.y + r.h};
@@ -427,6 +441,30 @@ COLORREF Family(int group, bool on)
 COLORREF FamilyText(int group)
 {
     return group ? RGB(120, 190, 150) : RGB(130, 160, 220);
+}
+
+// One rotary, drawn from a value rather than a knob index: the shifter is
+// not a wfc knob and must not read one
+void Rotary(HDC dc, Rect r, const char* label, float v, bool sel)
+{
+    const COLORREF ok = RGB(120, 220, 150), dim = RGB(120, 128, 150);
+    const COLORREF c  = sel ? ok : RGB(96, 118, 170);
+    const int cx = r.x + r.w / 2, cy = r.y + 46, rad = 30;
+    TextC(dc, cx, r.y, label, sel ? ok : dim);
+    HPEN   pen = CreatePen(PS_SOLID, 2, c);
+    HPEN   op  = (HPEN)SelectObject(dc, pen);
+    HBRUSH ob2 = (HBRUSH)SelectObject(dc, CreateSolidBrush(RGB(36, 39, 48)));
+    Ellipse(dc, cx - rad, cy - rad, cx + rad, cy + rad);
+    // 270 degree sweep, minimum at lower left
+    const double a = (225.0 - 270.0 * v) * 3.14159265 / 180.0;
+    MoveToEx(dc, cx, cy, nullptr);
+    LineTo(dc, cx + (int)(cos(a) * (rad - 4)), cy - (int)(sin(a) * (rad - 4)));
+    DeleteObject(SelectObject(dc, ob2));
+    SelectObject(dc, op);
+    DeleteObject(pen);
+    char s[32];
+    snprintf(s, sizeof(s), "%.2f", v);
+    TextC(dc, cx, cy + rad + 4, s, sel ? ok : dim);
 }
 
 void Paint(HWND hw)
@@ -454,8 +492,8 @@ void Paint(HWND hw)
 
     // What is broken right now, read from the SHOWN state: this is the line
     // that tells you which rule you are hearing
-    wfc::Violation vio[32];
-    const int      nv = wfc::Diagnose(vio, 32);
+    wfc::Violation vio[wfc::kMaxViolations];
+    const int      nv = wfc::Diagnose(vio, wfc::kMaxViolations);
     char           line[256] = "in check";
     if(nv)
     {
@@ -663,43 +701,36 @@ void Paint(HWND hw)
             TextC(dc, cx, r.y + r.h + 4, s, sel ? ok : dim);
         }
         else
-        {
-            const int cx = r.x + r.w / 2, cy = r.y + 46, rad = 30;
-            TextC(dc, cx, r.y, kKnobLabel[i], sel ? ok : dim);
-            HPEN   pen = CreatePen(PS_SOLID, 2, c);
-            HPEN   op  = (HPEN)SelectObject(dc, pen);
-            HBRUSH ob2 = (HBRUSH)SelectObject(dc, CreateSolidBrush(RGB(36, 39, 48)));
-            Ellipse(dc, cx - rad, cy - rad, cx + rad, cy + rad);
-            // 270 degree sweep, minimum at lower left
-            const double a = (225.0 - 270.0 * synth::Knob(i)) * 3.14159265 / 180.0;
-            MoveToEx(dc, cx, cy, nullptr);
-            LineTo(dc, cx + (int)(cos(a) * (rad - 4)), cy - (int)(sin(a) * (rad - 4)));
-            DeleteObject(SelectObject(dc, ob2));
-            SelectObject(dc, op);
-            DeleteObject(pen);
-            TextC(dc, cx, cy + rad + 4, s, sel ? ok : dim);
-        }
+            Rotary(dc, r, kKnobLabel[i], synth::Knob(i), sel);
     }
 
     for(int p = 0; p < synth::kPads; p++)
     {
-        const bool on   = synth::PadOn(p);
-        const bool conn = p == synth::kConnectorPad;
-        const int  v    = synth::PadVoice(p);
-        const int  grp  = v >= 0 ? wfc::GroupOf(v) : 0;
-        Box(dc, pad_r[p], conn ? (on ? RGB(214, 140, 40) : RGB(70, 52, 30))
-                               : Family(grp, on));
-        const COLORREF tc = on ? RGB(255, 255, 255)
-                               : (conn ? RGB(190, 150, 90) : FamilyText(grp));
+        const bool on  = synth::PadOn(p);
+        const int  v   = synth::PadVoice(p);
+        const int  grp = wfc::GroupOf(v);
+        Box(dc, pad_r[p], Family(grp, on));
+        const COLORREF tc = on ? RGB(255, 255, 255) : FamilyText(grp);
         char s[48];
         snprintf(s, sizeof(s), "P%02d  %c", p + 3, (char)kPadKey[p]);
         Text(dc, pad_r[p].x + 6, pad_r[p].y + 6, s, tc);
-        if(conn)
-            snprintf(s, sizeof(s), "bridge");
-        else
-            snprintf(s, sizeof(s), "%c%d %.0fHz", grp ? 'R' : 'L', v + 1,
-                     synth::PadHz(p));
+        snprintf(s, sizeof(s), "v%d %.0fHz", v + 1, synth::PadHz(p));
         Text(dc, pad_r[p].x + 6, pad_r[p].y + 36, s, tc);
+
+        // Contact force, with a mark at the point where leaning on the pad
+        // breaks its group. Hold Shift to reach it.
+        const float pr = synth::Pressure(p);
+        const int   bw = pad_r[p].w - 12;
+        const Rect  tr = {pad_r[p].x + 6, pad_r[p].y + pad_r[p].h - 12, bw, 6};
+        Box(dc, tr, RGB(28, 28, 32));
+        if(pr > 0.0f)
+        {
+            const Rect fr = {tr.x, tr.y, (int)(bw * (pr < 1.0f ? pr : 1.0f)),
+                             tr.h};
+            Box(dc, fr, pr >= 0.55f ? RGB(236, 96, 60) : tc);
+        }
+        Box(dc, {tr.x + (int)(bw * 0.55f), tr.y - 2, 1, tr.h + 4},
+            RGB(150, 150, 160));
     }
 
     for(int i = 0; i < 5; i++)
@@ -752,6 +783,8 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
         case WM_KEYDOWN:
         {
             Lock lk;
+            if(w == VK_SHIFT)
+                hard_press = true;
             if(l & 0x40000000)   // autorepeat: a pad press must be one press
                 return 0;
             for(int p = 0; p < synth::kPads; p++)
@@ -762,7 +795,7 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
             if(w == 'N')
                 synth::Settle();
             if(w == 'V')
-                sw_cell[2] = (sw_cell[2] + 1) % kSwCells[2];   // spike
+                sw_cell[1] = (sw_cell[1] + 1) % kSwCells[1];   // spike
             if(w == 'M')
                 sw_cell[1] = (sw_cell[1] + 2) % 3;   // cables
             if(w == 'C')
@@ -795,6 +828,8 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
         case WM_KEYUP:
         {
             Lock lk;
+            if(w == VK_SHIFT)
+                hard_press = false;
             for(int p = 0; p < synth::kPads; p++)
                 if((int)w == kPadKey[p] || (int)w == '1' + p)
                     synth::Release(p);
@@ -845,17 +880,15 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
             if(drag >= 0)
             {
                 Lock      lk;
+                const Rect& dr = knob_r[drag];
                 // Faders are dragged up, knobs right
-                const float d = knob_vert[drag]
-                                    ? (float)(drag_from.y - (short)HIWORD(l))
-                                          / (float)knob_r[drag].h
-                                    : (float)(LOWORD(l) - drag_from.x)
-                                          / (float)knob_r[drag].w;
+                const float d  = knob_vert[drag]
+                                     ? (float)(drag_from.y - (short)HIWORD(l))
+                                           / (float)dr.h
+                                     : (float)(LOWORD(l) - drag_from.x)
+                                           / (float)dr.w;
                 const float v = min(1.0f, max(0.0f, drag_at + d));
-                if(drag == 5)
-                    synth::SetAgitation(v);
-                else
-                    synth::SetKnob(drag, v);
+                synth::SetKnob(drag, v);
                 InvalidateRect(hw, nullptr, FALSE);
             }
             return 0;
