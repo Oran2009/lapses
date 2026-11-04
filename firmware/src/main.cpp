@@ -5,6 +5,8 @@
 
 #include "panel.h"
 #include "synth.h"
+#include "voices.h"
+#include "wfc.h"
 
 #include "daisy_seed.h"
 
@@ -27,11 +29,26 @@ uint32_t  blink_until = 0, stutter_until = 0;
 // blocks, not a backlog, so watching the loop would miss it entirely.
 // Latched and strobed on the LED: a glitch you have to listen for is a
 // judgement call, a strobe is not.
-constexpr uint32_t kBlockUs = 1000 * kBlock / 48;   // 48 kHz
+// 32 kHz, not 48: the render costs the same per sample whatever the rate, so
+// a third fewer samples is a third less CPU, and the wash has nothing up
+// there to lose -- measured over the band, 8-16 kHz sits 63 dB under the
+// signal and everything above 16 kHz, which is all that actually goes, sits
+// 73 dB under. Seven voices at 48 kHz left the board at 96% with no room for
+// a solve to land in.
+constexpr auto kRate = SaiHandle::Config::SampleRate::SAI_32KHZ;
+// Taken from the rate the hardware reports, not from a constant: this is the
+// yardstick every overrun below is measured against.
+uint32_t       block_us = 0;
 volatile uint16_t  over_n   = 0;
 // 8 ms of catch-up is plenty; past that the loop is not keeping up at all
 constexpr uint32_t kMaxLag  = 8;
-bool               strobe   = false;
+// Two things can fail to keep up and they want different fixes, so they
+// are counted apart: the callback running long, and the main loop falling
+// behind it. Worst block of the last second each, printed once a second.
+volatile uint16_t  lag_n    = 0;
+volatile uint16_t  cb_max   = 0;
+uint16_t           ctl_max  = 0;
+int                strobe   = 0;
 uint32_t           over_at  = 0;
 
 // The callback counts blocks; the main loop runs that many Control passes.
@@ -40,6 +57,15 @@ uint32_t           over_at  = 0;
 // or every smoothing time constant is wrong. Falling behind is caught up.
 volatile uint32_t blocks_done = 0;
 uint32_t          blocks_seen = 0;
+
+// Why one press of a pad is loud and the next one quiet. The peak the
+// callback actually puts out over the 400 ms after a press, printed next
+// to the tile that press rolled -- the only way to tell a solver problem
+// from a panel one, since the engine measures consistent on the desktop.
+volatile float    pk          = 0.0f;
+int               log_pad     = -1;
+uint32_t          log_at      = 0;
+bool              was_on[synth::kPads] = {};
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
                    size_t size)
@@ -65,9 +91,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     }
     // 90% of the budget: the main loop needs the rest. The first second is
     // ignored, with the SDRAM lines and caches still cold.
+    for(size_t i = 0; i < size; i++)
+    {
+        const float m = l[i] < 0.0f ? -l[i] : l[i];
+        if(m > pk)
+            pk = m;
+    }
     const uint32_t us = System::GetUs() - t0;
-    if(blocks_done > 1000 && us * 10 > kBlockUs * 9)
+    if(blocks_done > 1000 && us * 10 > block_us * 9)
         over_n++;
+    if(us > cb_max)
+        cb_max = (uint16_t)(us > 65535 ? 65535 : us);
 }
 
 }  // namespace
@@ -75,11 +109,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
 int main()
 {
     hw.Init();
+    // Not blocking: the instrument has to work with nothing attached
+    hw.StartLog(false);
     hw.SetAudioBlockSize(kBlock);
-    hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
+    hw.SetAudioSampleRate(kRate);
 
     const float sr = hw.AudioSampleRate();
     block_dt       = (float)kBlock / sr;
+    block_us       = (uint32_t)(block_dt * 1e6f);
     synth::Init(sr, kBlock);
 
     // Denormals: every decaying delay tail in here would otherwise fall into
@@ -100,22 +137,28 @@ int main()
         // The audio callback is the only accurate clock here, so everything
         // below is paced by it rather than by a counted Delay(1).
         //
-        // A block or two of lag is normal and gets caught up. A long
-        // backlog must NOT be: one iteration costs more than a block under
-        // load, so grinding through it never finishes -- blocks_done keeps
-        // moving, now_s advances a block per iteration and so runs away
-        // from real time, and the instrument tears itself apart. HOLD up
-        // with a rule rebuild from the Delay knob is enough to start it.
-        // Drop the backlog and keep the clock honest instead.
-        const uint32_t lag = blocks_done - blocks_seen;
-        if(lag > kMaxLag)
-        {
-            blocks_seen = blocks_done - 1;
-            now_s += block_dt * (float)(lag - 1);
-            over_n += (uint16_t)(lag - 1);
-        }
         while(blocks_seen != blocks_done)
         {
+            // A block or two of lag is normal and gets caught up. A long
+            // backlog must NOT be: one iteration costs more than a block
+            // under load, so grinding through it never finishes --
+            // blocks_done keeps moving, now_s advances a block per
+            // iteration and so runs away from real time, and the
+            // instrument tears itself apart. HOLD up with a rule rebuild
+            // from the Delay knob is enough to start it.
+            //
+            // Checked HERE, every iteration, not before the loop: once a
+            // pass costs more than a block this loop never exits, so a
+            // check outside it never runs a second time and the drop that
+            // is supposed to save the clock is unreachable exactly when it
+            // is needed.
+            const uint32_t lag = blocks_done - blocks_seen;
+            if(lag > kMaxLag)
+            {
+                blocks_seen = blocks_done - 1;
+                now_s += block_dt * (float)(lag - 1);
+                lag_n += (uint16_t)(lag - 1);
+            }
             blocks_seen++;
             now_s += block_dt;
 
@@ -127,9 +170,27 @@ int main()
                 panel::PollPads();
             else if((blocks_seen % panel::kPollDiv) == 2)
                 panel::Poll();
-            synth::Control(now_s);
+            {
+                const uint32_t c0 = System::GetUs();
+                synth::Control(now_s);
+                const uint32_t cu = System::GetUs() - c0;
+                if(cu > ctl_max)
+                    ctl_max = (uint16_t)(cu > 65535 ? 65535 : cu);
+            }
 
             const uint32_t now = System::GetNow();
+            for(int p = 0; p < synth::kPads; p++)
+            {
+                const bool on = synth::PadOn(p);
+                if(on && !was_on[p] && log_pad < 0)
+                {
+                    log_pad = p;
+                    log_at  = now;
+                    pk      = 0.0f;
+                    voices::TakePeak(synth::PadVoice(p));
+                }
+                was_on[p] = on;
+            }
             if(const int b = panel::TakeBlink())
                 blink_until = now + (b == 2 ? 600 : 150);
 
@@ -153,11 +214,47 @@ int main()
             // the same way.
             if(now - over_at >= 1000)
             {
-                strobe  = over_n >= 4;
+                strobe  = over_n >= 4 ? 1 : (lag_n >= 4 ? 2 : 0);
+                // One line, from the main loop only: each transmit
+                // blocks until the host takes it.
+                hw.PrintLine("cb %u us over %u | ctl %u us lag %u",
+                             (unsigned)cb_max, (unsigned)over_n,
+                             (unsigned)ctl_max, (unsigned)lag_n);
                 over_n  = 0;
+                lag_n   = 0;
+                cb_max  = 0;
+                ctl_max = 0;
                 over_at = now;
             }
-            hw.SetLed(strobe ? ((now / 60) & 1)
+            if(log_pad >= 0 && now - log_at >= 400)
+            {
+                const int v = synth::PadVoice(log_pad);
+                const int t = wfc::ShownTile(v);
+                hw.PrintLine("P%02d voice %u of mix %u | dly %u ms fb %u"
+                             " drv %u skew %u | dropped %u",
+                             (unsigned)(log_pad + 3),
+                             (unsigned)(voices::TakePeak(v) * 1000.0f),
+                             (unsigned)(pk * 1000.0f),
+                             (unsigned)(wfc::DR[wfc::TileD(t)]
+                                        * wfc::DelayBase() * 1000.0f),
+                             (unsigned)(wfc::FL[wfc::TileF(t)] * 100.0f),
+                             (unsigned)(wfc::RL[wfc::TileR(t)] * 100.0f),
+                             (unsigned)wfc::ShownSkew(v),
+                             (unsigned)wfc::EventsDropped());
+                hw.PrintLine("    dly %u fb %u drv %u flt %u mod %u ctl %u"
+                             " unr %u hold %u | oct %d gain %d dB",
+                             (unsigned)(synth::Knob(0) * 100.0f),
+                             (unsigned)(synth::Knob(1) * 100.0f),
+                             (unsigned)(synth::Knob(2) * 100.0f),
+                             (unsigned)(synth::Knob(3) * 100.0f),
+                             (unsigned)(synth::Knob(4) * 100.0f),
+                             (unsigned)(synth::Knob(5) * 100.0f),
+                             (unsigned)(synth::Knob(6) * 100.0f),
+                             (unsigned)(synth::Knob(7) * 100.0f),
+                             synth::Octave(), (int)synth::GainDb());
+                log_pad = -1;
+            }
+            hw.SetLed(strobe ? ((now / (strobe == 1 ? 60 : 300)) & 1)
                              : (int)(blocks_seen & 7) < duty);
         }
     }

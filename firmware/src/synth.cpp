@@ -271,7 +271,7 @@ void Press(int pad)
     {
         return;
     }
-    voices::SetPitch(v, PadHz(pad), true);
+    voices::SetPitch(v, PadHz(pad), 2.0f * RootHz(), true);
     wfc::SetSounding(v, true, now_s);
     SyncSounding(now_s);
     wfc::Pass(v, now_s);

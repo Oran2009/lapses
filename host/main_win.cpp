@@ -28,7 +28,7 @@
 
 namespace
 {
-constexpr int kSr    = 48000;
+constexpr int kSr    = 32000;   // the board's rate, so the shell hears what it does
 constexpr int kBlock = 64;
 
 // The board reads contact force off the MPR121; a keyboard has none, so

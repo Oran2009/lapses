@@ -62,7 +62,10 @@ void Init(float sample_rate, int block_size);
 
 // The pad's pitch for this voice. `snap` jumps the partials there instead of
 // gliding, which is what a fresh press wants.
-void SetPitch(int v, float hz, bool snap);
+// `ref` is the pitch the voice's spectral tilt is measured against -- the
+// chord's root an octave up, so the ensemble keeps the same brightness
+// spread whatever octave it is played at. 0 means twice this voice's own.
+void SetPitch(int v, float hz, float ref, bool snap);
 float Pitch(int v);
 
 // One control tick (~1 kHz, from the audio callback's block rate): advances
@@ -106,6 +109,8 @@ float LoopLevel(int v);
 // another voice is fresh, more while it is the fresh one
 float OutGain(int v);
 float BusLvl(int v);   // what it is putting on the bus right now
+// Loudest sample this voice alone has put on the bus since the last call
+float TakePeak(int v);
 // Extra dry a freshly pressed voice sends, before its loop has filled
 float DryLift(int v);
 

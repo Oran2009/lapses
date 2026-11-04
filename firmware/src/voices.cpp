@@ -246,12 +246,24 @@ struct Voice
     float    lvl_sum;          // |loop| over the last block
     int      lvl_n;
     float    out_lvl;          // and the finished value, for the duck
+    // Loudest sample this voice alone put on the bus, for the press log
+    float    pk;
     // What Process resolved for this block, kept for the display
     float    eff_dly, eff_fb, eff_pre, pan_now, depth_now;
     float    m_dly, m_dly_t;
     float    m_fb, m_fb_t;
     float    m_pre, m_pre_t;
     float    sweep;   // seconds of slow delay travel left after a break
+    // What the partial levels were last computed for, so the sixteen powf
+    // calls below only run when one of them actually moved
+    float    pf_hz;
+    int      pf_model;
+    float    pf_ref;
+    // The pitch the spectral tilt is measured against: the chord's root an
+    // octave up, handed in at press time. It has to travel with the voice
+    // rather than be a constant, or the tilt stops meaning anything the
+    // moment the octave moves -- see SetPartialFreqs.
+    float    ref;
     float    outg, outg_t;   // what this voice sends to the bus
     float    dryl, dryl_t;   // extra dry while it is the fresh one
     float    mod;   // its value this tick
@@ -301,17 +313,40 @@ void SetPartialFreqs(Voice& vo, bool snap)
     // floor were 0.55/1.25, which put 220 Hz at tilt 1.35 and 42% of its
     // energy in that band; 1.5/0.55 puts it at 0.55 and 58%. Turn the floor
     // down for more bite at the bottom, up if the low pads buzz.
-    const float tilt = Clamp(1.9f - 1.5f * logf(440.0f / vo.hz) * 1.442695f,
-                             0.55f, 1.9f)
-                       * M().rolloff;
+    // The tilt and the levels it sets move only when the pitch or the model
+    // does; the detune wanders every block. Recomputing both every block cost
+    // sixteen powf per voice, which at seven voices was two thirds of the
+    // main loop's whole per-block budget on the board.
+    const bool relevel = snap || vo.pf_hz != vo.hz || vo.pf_model != cur_model
+                         || vo.pf_ref != vo.ref;
+    if(relevel)
+    {
+        // Measured against the chord's own root, not against a fixed 440.
+        // With 440 hardwired, every voice at or above it clamped to the
+        // steepest rolloff, so one octave up the whole ensemble collapsed
+        // to the same near-pure fundamental -- seven voices with 8.8% of
+        // their energy in overtones and nothing to tell them apart but
+        // pitch. Relative to the root the spread is the same in every
+        // octave, and the same as octave 0 used to be.
+        const float tilt
+            = Clamp(1.9f - 1.5f * logf(vo.ref / vo.hz) * 1.442695f, 0.55f, 1.9f)
+              * M().rolloff;
+        for(int k = 0; k < kPartials; k++)
+            vo.p[k].base = powf(M().ratio[k], -tilt) * M().amp[k];
+        vo.pf_hz    = vo.hz;
+        vo.pf_model = cur_model;
+        vo.pf_ref   = vo.ref;
+    }
     for(int k = 0; k < kPartials; k++)
     {
         Partial&    p  = vo.p[k];
         const float kk = M().ratio[k];
         // A touch of inharmonicity, so the partials beat rather than lock
         const float f  = vo.hz * kk * (1.0f + 0.00015f * kk * kk);
-        const float det = powf(2.0f, p.det / 1200.0f);
-        p.base = powf(kk, -tilt) * M().amp[k];
+        // 2^(cents/1200) by series, not powf: the exponent is under a
+        // twentieth here, where two terms are good to a twentieth of a cent.
+        const float x   = p.det * (0.69314718f / 1200.0f);
+        const float det = 1.0f + x * (1.0f + 0.5f * x);
         if(snap)
             p.lvl = p.lvl_t = p.base;
         else
@@ -351,6 +386,7 @@ void Init(float sample_rate, int block_size)
         memset(vo.line, 0, sizeof(float) * kDelayMax);
         vo.wr = 0;
         vo.hz = 220.0f;
+        vo.ref = 440.0f;
         vo.outg = vo.outg_t = 1.0f;
         vo.dryl = vo.dryl_t = 1.0f;
         vo.vlp.Reset();
@@ -362,7 +398,7 @@ void Init(float sample_rate, int block_size)
         vo.xf = vo.xf_t = 0.0f;
         vo.pre = vo.pre_t = 1.0f;
         vo.mspeed = vo.mspeed_t = 0.5f;
-        vo.fast = vo.slow = vo.lvl_sum = vo.out_lvl = 0.0f;
+        vo.fast = vo.slow = vo.lvl_sum = vo.out_lvl = vo.pk = 0.0f;
         vo.lvl_n              = 0;
         for(int k = 0; k < kPartials; k++)
         {
@@ -451,13 +487,19 @@ float CableEff(int src, int dst)
     return Ok(src, dst) ? v[src].cab[dst] + bri[src][dst] : 0.0f;
 }
 
-void SetPitch(int i, float hz, bool snap)
+void SetPitch(int i, float hz, float ref, bool snap)
 {
+    v[i].ref = ref > 0.0f ? ref : 2.0f * hz;
+    // Braced. The indentation always said these four belonged together and
+    // only the first one did; it has never mattered because the one caller
+    // always snaps, but the next one would have found it the hard way.
     if(snap)
+    {
         v[i].fresh = 1.0f;
         v[i].sweep = 0.0f;
         v[i].outg = v[i].outg_t = 1.0f;
         v[i].dryl = v[i].dryl_t = 1.0f;
+    }
     v[i].hz = hz;
     SetPartialFreqs(v[i], snap);
 }
@@ -474,6 +516,12 @@ float LoopLevel(int i) { return v[i].fast; }
 float OutGain(int i) { return v[i].outg; }
 // What this voice is actually putting on the bus, as the duck sees it
 float BusLvl(int i) { return v[i].out_lvl * v[i].wet * v[i].outg; }
+float TakePeak(int i)
+{
+    const float p = v[i].pk;
+    v[i].pk       = 0.0f;
+    return p;
+}
 
 float DryLift(int i) { return v[i].dryl; }
 
@@ -660,38 +708,7 @@ void Control(float now, float dt)
             vo.fb    = vo.fb_t;
             vo.pre   = vo.pre_t;
         }
-        const bool sweeping = vo.sweep > 0.0f;
-        if(sweeping)
-            vo.sweep -= dt;
-
-        // A break DRAGS the tap, and that scrub is the gesture. A knob move
-        // must not: sliding the read tap Dopplers everything already in the
-        // line, which is the scrubbing. So the knob crossfades to a second
-        // tap sitting at the new distance instead of travelling there.
-        vo.xf = vo.xf_t;
-        if(sweeping)
-        {
-            Approach(vo.dly, vo.dly_t, Coeff(kSweepT, dt));
-            vo.dly_n = vo.dly;
-            vo.xf = vo.xf_t = 0.0f;
-        }
-        else
-        {
-            if(vo.xf >= 1.0f)
-            {
-                vo.dly = vo.dly_n;
-                vo.xf = vo.xf_t = 0.0f;
-            }
-            if(vo.xf > 0.0f)
-                vo.xf_t = fminf(vo.xf + dt / kXfadeT, 1.0f);
-            // One fade at a time: a new target that lands mid-fade waits,
-            // which costs a block or two and keeps the taps click-free
-            else if(fabsf(vo.dly_t - vo.dly) > 1e-5f)
-            {
-                vo.dly_n = vo.dly_t;
-                vo.xf_t  = dt / kXfadeT;
-            }
-        }
+        // The tap itself moves in AdvanceTaps, once per rendered block.
         Approach(vo.fb, vo.fb_t, co.fb);
         Approach(vo.lcut, vo.lcut_t, co.lcut);
         Approach(vo.pre, vo.pre_t, co.pre);
@@ -747,9 +764,55 @@ void Control(float now, float dt)
     }
 }
 
+// The read tap's state, advanced once per RENDERED block. It cannot live in
+// Control: Control runs in the main loop, and under load that loop skips
+// blocks or catches several up at once. A crossfade stepped from there
+// stalls or jumps mid-fade, and one that completes between two renders moves
+// the tap in a single step -- seven taps doing that while the Delay knob
+// turns is the filtered noise.
+void AdvanceTaps(float dt)
+{
+    for(int i = 0; i < wfc::kVoices; i++)
+    {
+        Voice& vo = v[i];
+        // A break DRAGS the tap, and that scrub is the gesture. A knob move
+        // must not: sliding the read tap Dopplers everything already in the
+        // line. So the knob crossfades to a second tap sitting at the new
+        // distance instead of travelling there.
+        const bool sweeping = vo.sweep > 0.0f;
+        if(sweeping)
+            vo.sweep -= dt;
+        vo.xf = vo.xf_t;
+        if(sweeping)
+        {
+            Approach(vo.dly, vo.dly_t, Coeff(kSweepT, dt));
+            vo.dly_n = vo.dly;
+            vo.xf = vo.xf_t = 0.0f;
+        }
+        else
+        {
+            if(vo.xf >= 1.0f)
+            {
+                vo.dly = vo.dly_n;
+                vo.xf = vo.xf_t = 0.0f;
+            }
+            if(vo.xf > 0.0f)
+                vo.xf_t = fminf(vo.xf + dt / kXfadeT, 1.0f);
+            // One fade at a time: a new target that lands mid-fade waits,
+            // which costs a block or two and keeps the taps click-free
+            else if(fabsf(vo.dly_t - vo.dly) > 1e-5f)
+            {
+                vo.dly_n = vo.dly_t;
+                vo.xf_t  = dt / kXfadeT;
+            }
+        }
+    }
+}
+
 void Process(float* out_l, float* out_r, int n, const float* in,
              float in_mix)
 {
+    AdvanceTaps((float)n * inv_sr);
     // Resolved once a block: the mod and every smoothed value hold still
     // across it, which is what makes the per-sample loop cheap
     float dsamp[wfc::kVoices], dsamp2[wfc::kVoices], fbg[wfc::kVoices],
@@ -785,6 +848,17 @@ void Process(float* out_l, float* out_r, int n, const float* in,
         vo.eff_fb  = fbg[i];
         vo.eff_pre = preg[i];
     }
+
+    // Nothing patched is the normal case, and the scan below is seven loads
+    // per voice per sample -- 42 of them a sample that add up to nothing.
+    bool crossing = false;
+    for(int i = 0; i < wfc::kVoices && !crossing; i++)
+        for(int j = 0; j < wfc::kVoices; j++)
+            if(bri[i][j] != 0.0f || v[i].cab[j] != 0.0f)
+            {
+                crossing = true;
+                break;
+            }
 
     for(int s = 0; s < n; s++)
     {
@@ -828,7 +902,7 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             // the feedback instead. Mod has to be per sample because the
             // modulator IS audio -- there is nothing slow about it.
             float fed = 0.0f, dmod = 0.0f, fmod = 0.0f;
-            for(int j = 0; j < wfc::kVoices; j++)
+            for(int j = 0; j < (crossing ? wfc::kVoices : 0); j++)
             {
                 if(j == i)
                     continue;
@@ -861,8 +935,16 @@ void Process(float* out_l, float* out_r, int n, const float* in,
                                     (float)(kDelayMax - 2));
             const int   di  = (int)ds;
             const float fr  = ds - (float)di;
-            const int   i0  = (vo.wr - di + kDelayMax) % kDelayMax;
-            const int   i1  = (i0 - 1 + kDelayMax) % kDelayMax;
+            // Wrapped by subtraction, not by %: kDelayMax is not a power
+            // of two, so each % is a real integer divide, and there are
+            // five per voice per sample. The tap is never more than one
+            // buffer behind the write head, so one test is enough.
+            int         i0  = vo.wr - di;
+            if(i0 < 0)
+                i0 += kDelayMax;
+            int         i1  = i0 - 1;
+            if(i1 < 0)
+                i1 += kDelayMax;
             const float out = vo.line[i0] + (vo.line[i1] - vo.line[i0]) * fr;
             float outm = out, o2;
             if(xf[i] > 0.0f)
@@ -876,8 +958,12 @@ void Process(float* out_l, float* out_r, int n, const float* in,
                                        (float)(kDelayMax - 2));
                 const int   ni = (int)ns;
                 const float nf = ns - (float)ni;
-                const int   n0 = (vo.wr - ni + kDelayMax) % kDelayMax;
-                const int   n1 = (n0 - 1 + kDelayMax) % kDelayMax;
+                int         n0 = vo.wr - ni;
+                if(n0 < 0)
+                    n0 += kDelayMax;
+                int         n1 = n0 - 1;
+                if(n1 < 0)
+                    n1 += kDelayMax;
                 const float nv = vo.line[n0]
                                  + (vo.line[n1] - vo.line[n0]) * nf;
                 // Equal power by square root, not by sin/cos: the two taps
@@ -894,12 +980,16 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             {
                 const int   dj = (int)dsamp2[i];
                 const float fj = dsamp2[i] - (float)dj;
-                const int   j0 = (vo.wr - dj + kDelayMax) % kDelayMax;
-                const int   j1 = (j0 - 1 + kDelayMax) % kDelayMax;
+                int         j0 = vo.wr - dj;
+                if(j0 < 0)
+                    j0 += kDelayMax;
+                int         j1 = j0 - 1;
+                if(j1 < 0)
+                    j1 += kDelayMax;
                 o2 = vo.line[j0] + (vo.line[j1] - vo.line[j0]) * fj;
             }
 
-            vo.wr           = (vo.wr + 1) % kDelayMax;
+            vo.wr           = vo.wr + 1 >= kDelayMax ? 0 : vo.wr + 1;
 
             // The loop's filters and its distortion
             const float lp  = vo.llp.Process(outm);
@@ -928,7 +1018,11 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             // dryl is applied HERE and not to `dry` above, so the line is
             // fed the same signal either way and the loop is unchanged
             const float mix = dry * (1.0f - in_mix) * vo.dryl;
-            l += (mix + pst * vo.wet) * vo.pan_l * vo.outg;
+            const float cl = (mix + pst * vo.wet) * vo.pan_l * vo.outg;
+            const float ca = cl < 0.0f ? -cl : cl;
+            if(ca > vo.pk)
+                vo.pk = ca;
+            l += cl;
             r += (mix + pst2 * vo.wet) * vo.pan_r * vo.outg;
         }
         out_l[s] += l;

@@ -571,7 +571,7 @@ static void TestCableStructure()
     }
 }
 
-constexpr float kSr    = 48000.0f;
+constexpr float kSr    = 32000.0f;   // what the board runs at
 constexpr int   kBlock = 48;
 
 // What one run of the engine came out as
@@ -657,7 +657,7 @@ static void Start(float& now, int n_voices)
         // The prototype's default: major, root A, so pad 1 is 220 Hz
         static const float hz[kVoices]
             = {220.0f, 264.0f, 330.0f, 440.0f, 528.0f, 660.0f, 880.0f};
-        voices::SetPitch(i, hz[i], true);
+        voices::SetPitch(i, hz[i], 2.0f * hz[0], true);
         Pass(i, now);
         now += 0.02f;
     }
@@ -669,7 +669,7 @@ static void TestPadsAndVoices()
 {
     printf("seven voices, one per pad, one group\n");
     float now = 0.0f;
-    synth::Init(48000.0f, 48);
+    synth::Init(kSr, 48);
     for(int p = 0; p < synth::kPads; p++)
         Check("each pad owns its own voice", synth::PadVoice(p) == p);
     Check("one group", kGroups == 1 && kGroupSize == kVoices);
@@ -702,7 +702,7 @@ static void TestPadsAndVoices()
 static void TestEventQueueHolds()
 {
     printf("the event queue holds a full Tick's worth across both groups\n");
-    synth::Init(48000.0f, 48);
+    synth::Init(kSr, 48);
     float now = 0.0f;
     for(int p = 0; p < synth::kPads; p++)
         if(synth::PadVoice(p) >= 0)
@@ -722,7 +722,7 @@ static void TestLoneVoiceInGroup()
 {
     printf("a group of one still settles\n");
     float now = 0.0f;
-    synth::Init(48000.0f, 48);
+    synth::Init(kSr, 48);
     synth::SetKnob(5, 1.0f);   // Control: strictest
     synth::SetCableMode(voices::kCableFeed);
     synth::Press(0);
@@ -736,7 +736,7 @@ static void TestLoneVoiceInGroup()
 static void TestInputDetector()
 {
     printf("a signal on the input turns it into an effects box\n");
-    synth::Init(48000.0f, kBlock);
+    synth::Init(kSr, kBlock);
     K().unrest = 0.0f;
     synth::Press(0);
 
@@ -791,7 +791,7 @@ static void TestInputDetector()
 static void TestOctaveLeavesHeldVoicesAlone()
 {
     printf("the octave applies to the next press, not what is sounding\n");
-    synth::Init(48000.0f, kBlock);
+    synth::Init(kSr, kBlock);
     K().unrest = 0.0f;
     synth::Press(0);
     const float was = voices::Pitch(synth::PadVoice(0));
@@ -812,7 +812,7 @@ static void TestHold()
     printf("hold floors every voice and a press rides on top\n");
     float now = 0.0f;
     auto run  = [&](float hold) {
-        synth::Init(48000.0f, kBlock);
+        synth::Init(kSr, kBlock);
         synth::SetKnob(7, hold);
         synth::Press(0);
         synth::Press(3);
@@ -835,7 +835,7 @@ static void TestHold()
 
     // The floor applies to a voice whose pad was never touched: that is what
     // makes HOLD a drone rather than a long tail
-    synth::Init(48000.0f, kBlock);
+    synth::Init(kSr, kBlock);
     synth::SetKnob(7, 0.4f);
     AdvanceSeconds(now, 5.0f);
     Near("an untouched voice rises to the floor", voices::Amp(1), 0.4f, 0.01f);
@@ -856,7 +856,7 @@ static void TestHoldIsSounding()
 {
     printf("a HOLD-floored voice stays in the solver\n");
     float now = 0.0f;
-    synth::Init(48000.0f, 48);
+    synth::Init(kSr, 48);
     synth::SetKnob(7, 1.0f);
     synth::Press(0);
     AdvanceSeconds(now, 1.0f);
@@ -1170,7 +1170,7 @@ static void TestNeverBlowsUp()
 static void RippleShape(float r, int seed, double& span)
 {
     float now = 0.0f;
-    synth::Init(48000.0f, 48);
+    synth::Init(kSr, 48);
     wfc::Init(seed);
     wfc::SetRipple(r);
     for(int p = 0; p < synth::kPads; p++)
@@ -1232,7 +1232,7 @@ static void TestBreakIsAGesture()
     for(uint32_t seed = 3; seed <= 30; seed += 3)
     {
         float now = 0.0f;
-        synth::Init(48000.0f, 48);
+        synth::Init(kSr, 48);
         wfc::Init(seed);
         for(int p = 0; p < synth::kPads; p++)
             if(synth::PadVoice(p) >= 0)
@@ -1256,14 +1256,19 @@ static void TestBreakIsAGesture()
         // A snap is a discontinuity, so look for it as one: the largest
         // single-block step against the whole distance travelled. A glide
         // with a ~0.05 s constant can never move more than a few percent in
-        // one millisecond.
+        // one block. Stepped by the block, not by a fixed millisecond: a
+        // block is 1.5 ms at the rate the board runs at, and asking
+        // AdvanceSeconds for less than one advances nothing at all.
         float step[kVoices] = {}, walked[kVoices] = {}, prev[kVoices];
         for(int v = 0; v < kVoices; v++)
             prev[v] = f0[v];
         float dmid[kVoices];
-        for(int k = 0; k < 250; k++)
+        const float bdt  = (float)kBlock / kSr;
+        const int   kEnd = (int)(0.25f / bdt), k50 = (int)(0.05f / bdt),
+                    k100 = (int)(0.10f / bdt);
+        for(int k = 0; k < kEnd; k++)
         {
-            AdvanceSeconds(now, 0.001f);
+            AdvanceSeconds(now, bdt);
             for(int v = 0; v < kVoices; v++)
             {
                 const float d = fabsf(voices::EffFb(v) - prev[v]);
@@ -1272,13 +1277,13 @@ static void TestBreakIsAGesture()
                     step[v] = d;
                 prev[v] = voices::EffFb(v);
             }
-            if(k == 249)
+            if(k == kEnd - 1)
                 for(int v = 0; v < kVoices; v++)
                     dmid[v] = voices::EffDly(v);
-            if(k == 49 || k == 99)
+            if(k == k50 || k == k100)
                 for(int v = 0; v < kVoices; v++)
                     if(fabsf(voices::EffDly(v) - d0[v]) > 1e-5f)
-                        settled[k == 49 ? 0 : 1]++;
+                        settled[k == k50 ? 0 : 1]++;
         }
         AdvanceSeconds(now, 6.0f);
         SetFrozen(false);
@@ -1336,7 +1341,7 @@ static void TestReleaseRerollsTheTail()
     for(uint32_t seed = 1; seed <= (uint32_t)kRuns; seed++)
     {
         float now = 0.0f;
-        synth::Init(48000.0f, 48);
+        synth::Init(kSr, 48);
         wfc::Init(seed);
         synth::Press(0);
         AdvanceSeconds(now, 2.0f);
@@ -1393,7 +1398,7 @@ static void BandRms(float& now, float secs, double& hi, double& full)
 // Seeds whose settled wash happens to sit at the two ends of its range
 static double WashAfterPress(int seed, bool press, float& now)
 {
-    synth::Init(48000.0f, 48);
+    synth::Init(kSr, 48);
     wfc::Init(seed);
     for(int j = 0; j < synth::kPads; j++)
         if(j != 0)
@@ -1452,7 +1457,7 @@ static void TestTheDuckTargetsALevel()
 // only have been moved by the squeeze.
 static int TilesAfter(float& now, bool squeeze, int seed)
 {
-    synth::Init(48000.0f, 48);
+    synth::Init(kSr, 48);
     wfc::Init(seed);
     now = 0.0f;
     synth::Press(0);
@@ -1485,7 +1490,7 @@ static double BenchOne()
     for(int rep = 0; rep < kReps; rep++)
     {
         float now = 0.0f;
-        synth::Init(48000.0f, 48);
+        synth::Init(kSr, 48);
         wfc::Init(5);
         voices::SetCableMode(voices::kCableFeed);
         for(int p = 0; p < synth::kPads; p++)
@@ -1571,7 +1576,7 @@ static void TestBreaksFindTheLoudVoice()
     for(int seed = 1; seed <= kRuns; seed++)
     {
         float now = 0.0f;
-        synth::Init(48000.0f, 48);
+        synth::Init(kSr, 48);
         wfc::Init(seed);
         synth::Press(0);   // voice 0
         synth::Press(1);   // voice 1
@@ -1606,7 +1611,7 @@ static void TestTheLedSeesBreaks()
 {
     printf("the LED is told when a break actually arrives\n");
     float now = 0.0f;
-    synth::Init(48000.0f, 48);
+    synth::Init(kSr, 48);
     wfc::Init(7);
     synth::Press(0);
     synth::Press(1);
@@ -1648,7 +1653,7 @@ static void TestLeaningOnAPadBreaksIt()
     Check("resting on the pad does not", light == 0);
 
     // Hysteresis: held past the threshold it must not fire again
-    synth::Init(48000.0f, 48);
+    synth::Init(kSr, 48);
     wfc::Init(4);
     now = 0.0f;
     synth::Press(0);
@@ -1696,7 +1701,7 @@ static void TestTheKnobDoesNotDragTheTap()
 {
     printf("turning Delay crossfades taps instead of sliding one\n");
     float now = 0.0f;
-    synth::Init(48000.0f, 48);
+    synth::Init(kSr, 48);
     wfc::Init(3);
     synth::SetKnob(4, 0.0f);   // mod off: it moves the tap on purpose
     synth::SetKnob(0, 0.3f);
@@ -1752,7 +1757,7 @@ static void TestLowPadsCarryTheBand()
         for(int seed = 1; seed <= kSeeds; seed++)
         {
             float now = 0.0f;
-            synth::Init(48000.0f, 48);
+            synth::Init(kSr, 48);
             wfc::Init(seed);
             synth::Press(kPad[j]);
             AdvanceSeconds(now, 0.1f);
@@ -1773,7 +1778,7 @@ static void TestNewVoiceGetsRoom()
 {
     printf("a new pad steps the other voices back at the bus\n");
     float now = 0.0f;
-    synth::Init(48000.0f, 48);
+    synth::Init(kSr, 48);
     wfc::Init(5);
     // Three voices with tails, settled, so the wash is what a new pad has
     // to cut through

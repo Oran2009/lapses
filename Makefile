@@ -4,6 +4,7 @@
 #   make run    build it and start it
 #   make test   build it and run its self test
 #   make daisy  the Touch 2 build:            firmware/build/lapses.bin
+#   make monitor  attach to the board's USB serial and print what it says
 #
 # Both shells link the same engine. Only the shell differs: host/main_win.cpp
 # puts a window and waveOut around it, firmware/src/main.cpp puts the Touch 2
@@ -34,6 +35,12 @@ run: host
 .PHONY: test
 test: host
 	@./host/build/lapses.exe --selftest
+
+PYTHON ?= ../synthux/vs-env/Scripts/python.exe
+
+.PHONY: monitor
+monitor:
+	@$(PYTHON) firmware/monitor.py $(ARGS)
 
 .PHONY: daisy
 daisy:

@@ -1328,8 +1328,6 @@ int Diagnose(Violation* out, int max, int group)
             out[cnt++] = Violation{kSwell, {a, -1}};
         if(RL[TileR(t)] * dm > limits.Rself && cnt < max)
             out[cnt++] = Violation{kFuzz, {a, -1}};
-        if(limits.ratio_on && shown_skew[a] && cnt < max)
-            out[cnt++] = Violation{kEcho, {a, -1}};
         // Rule 7: fed and ringing at once, which only feed can be
         if(cable_mode == 1 && cnt < max
            && (FL[TileF(t)] * fm + in_amt[a] > limits.Iflood
@@ -1371,8 +1369,7 @@ int Diagnose(Violation* out, int max, int group)
         for(int j = i + 1; j < n && cnt < max; j++)
         {
             const int a = act[i], b = act[j];
-            const int ta = shown_tile[a], tb = shown_tile[b];
-            const float dd = fabsf(DR[TileD(ta)] - DR[TileD(tb)]);
+            const float dd = fabsf(ShownDly(a) - ShownDly(b));
             if(limits.ratio_on && cnt < max && dd >= 1e-6f
                && dd * base < limits.gap)
                 out[cnt++] = Violation{kEcho, {a, b, -1}};
