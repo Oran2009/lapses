@@ -36,7 +36,7 @@ inline float Smooth(float a, float b, float x)
     return k * k * (3.0f - 2.0f * k);
 }
 
-Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f};
+Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f, 1.0f};
 bool   frozen = false;
 // How a wave travels: the gap between one voice changing and the next, and,
 // past kSpread, whether it carries into the other group. It had a fader of
@@ -699,7 +699,13 @@ int RandomPatchOpt(int v, const int* act, int n)
         }
     const bool use_live = nl && Rand() < 0.65f;
     const int  pick     = use_live ? live[RandInt(nl)] : others[RandInt(no)];
-    return 1 + pick * 3 + RandInt(3);
+    // The amount used to be a bare dice roll -- the one thing about a cable
+    // nothing on the panel could reach. The knob asks, the jitter keeps the
+    // ensemble from landing on one amount, rule 5 still gets to refuse.
+    const float want = knob.cable * 2.0f;
+    int         amt  = (int)(want * (0.4f + 0.8f * Rand()) + 0.5f);
+    amt              = amt < 0 ? 0 : (amt > 2 ? 2 : amt);
+    return 1 + pick * 3 + amt;
 }
 
 int RandomModOpt()
@@ -757,6 +763,7 @@ float DrvMul() { return Lerp(0.4f, 1.6f, knob.drive); }
 // Raised from 1.5 when the mod rule went: nothing caps depth now, so the
 // knob is the only ceiling
 float ModMul() { return Lerp(0.0f, 4.0f, knob.mod); }
+float CableMul() { return Clamp(knob.cable, 0.0f, 1.0f); }
 float LoopCut() { return 300.0f * powf(24.0f, knob.filter); }
 float VoiceCutMul() { return Lerp(1.5f, 14.0f, knob.filter); }
 // Unrest used to ride on strictness, which made strict-but-restless and

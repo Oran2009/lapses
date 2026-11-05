@@ -281,7 +281,7 @@ const char  kXpKey[5]  = {'Z', 0, 'X', '-', '='};
 // Engine knob index -> the panel's name, so the window reads like the board
 const char* kKnobLabel[synth::kKnobs]
     = {"S32 delay", "S31 feedback", "S33 distortion", "S34 filter",
-       "S30 mod",   "", "",              "S37 HOLD"};
+       "S30 mod",   "", "",              "S37 HOLD", "S35 cables"};
 
 // Panel replica on the left, cards and GUI-only controls to its right
 constexpr int kPx = 16, kPy = 16, kPW = 540, kPH = 908;
@@ -306,7 +306,7 @@ const char* kSwLabel[kSwitches][kSwMaxCells]
        {},
        {"live", "freeze"}};
 const char* kSwName[kSwitches]
-    = {"S09/S10 cables", "voice model (V)", "freeze (C)"};
+    = {"S07/S08 cables", "voice model (V)", "freeze (C)"};
 
 // The model cells are named by the engine, so there is one list and not two
 const char* SwLabel(int k, int c)
@@ -332,7 +332,8 @@ void Layout()
     auto Y = [](float f) { return kPy + (int)(kPH * f); };
     struct Spot { int k; float fx, fy; };
     static const Spot knobs[] = {{1, .2f, .35f}, {0, .4f, .35f}, {2, .6f, .35f},
-                                 {3, .8f, .35f}, {4, .2f, .48f}};
+                                 {3, .8f, .35f}, {4, .2f, .48f},
+                                 {8, .8f, .48f}};
     for(const Spot& sp : knobs)
     {
         knob_r[sp.k]    = {X(sp.fx) - 50, Y(sp.fy) - 46, 100, 96};

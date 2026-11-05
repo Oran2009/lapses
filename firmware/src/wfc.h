@@ -71,7 +71,7 @@ inline int ModDepthOf(int o) { return o % 4; }
 // The six knobs, each 0..1 (4.2)
 struct Knobs
 {
-    float delay, fb, drive, filter, mod, safe, unrest, hold;
+    float delay, fb, drive, filter, mod, safe, unrest, hold, cable;
 };
 
 // What the rules allow at the current strictness (4.4)
@@ -136,6 +136,11 @@ float FbMul();
 float ChargeMul();
 float DrvMul();
 float ModMul();
+// S35: how hard a cable is driven, 0..1 of what the solver allowed. It only
+// ever attenuates, because the cable rules size their budgets from AMT and
+// a knob that could exceed them would make the solver's own stability
+// analysis wrong.
+float CableMul();
 float LoopCut();
 float VoiceCutMul();
 float LapseChance();

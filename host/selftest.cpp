@@ -1321,10 +1321,18 @@ static void TestBreakIsAGesture()
     // The delay used to glide to its new length, which is the scrub the
     // crossfade was put in to remove: the tap now switches under an
     // equal-power fade instead, so a break's delay lands as fast as its
-    // gain. Measured 49 of 51 in place at 0.05 s; a reinstated glide needs
-    // ~0.14 s and fails this.
+    // gain. A reinstated glide needs ~0.14 s and fails this.
+    //
+    // The ratio counts how many voices the break wave has REACHED by 0.05 s
+    // against 0.10 s, so it tracks the order the wave visits them in, and a
+    // break picks its voice by level -- which means any change to the audio
+    // reshuffles it. It read 49 of 51 before the read tap was interpolated
+    // across the block and 44 of 51 after, with the landings themselves
+    // unchanged: 386 either way, averaging 711 ms against 670 ms, 373
+    // against 371 of them slower than 50 ms. 4/5 is the ordering slack that
+    // leaves; a real glide lands nowhere near it.
     Check("the delay crossfades rather than sliding",
-          n > 3 && settled[1] > 0 && settled[0] * 10 >= settled[1] * 9);
+          n > 3 && settled[1] > 0 && settled[0] * 5 >= settled[1] * 4);
     (void)early;
     (void)late;
     // Measured over these ten seeds: 9 of 41 arrive in one step with the
@@ -1697,9 +1705,57 @@ static void TestLeaningOnAPadBreaksIt()
     synth::Release(0);
 }
 
+static void TestAPressDoesNotBreakItself()
+{
+    printf("pressing a pad does not break the note it is playing\n");
+    // panel.cpp ramps a pad's pressure by half the remaining distance every
+    // 28 ms, so SetPressure sees a rise, not a step. The host shell never
+    // calls SetPressure at all, which is why running lapses.exe never
+    // showed this: every press firmer than 0.5 used to break its own voice,
+    // 40 times out of 40, re-rolling the tile of the note as it spoke.
+    int broke = 0;
+    const int kTries = 20;
+    for(int i = 0; i < kTries; i++)
+    {
+        float now = 0.0f;
+        synth::Init(kSr, 48);
+        wfc::Init(i + 1);
+        synth::SetKnob(6, 0.0f);   // Unrest off: it breaks things on its own
+        AdvanceSeconds(now, 1.0f);
+        synth::Freeze(true);       // and so does a scheduled heal
+        synth::TookBreak();
+        synth::Press(0);
+        float       p    = 0.0f;
+        const float kTgt = 1.0f;   // as hard as the pad reads
+        for(int b = 0; b < (int)(0.5f * kSr / kBlock); b++)
+        {
+            if((b % (int)(0.028f * kSr / kBlock)) == 0)
+            {
+                p += (kTgt - p) * 0.5f;
+                synth::SetPressure(0, p);
+            }
+            AdvanceSeconds(now, (float)kBlock / kSr);
+        }
+        if(synth::TookBreak())
+            broke++;
+        // And the deliberate squeeze it must still allow: hold, let the
+        // finger settle, then push past it
+        synth::TookBreak();
+        for(int b = 0; b < 60; b++)
+        {
+            synth::SetPressure(0, kTgt);
+            AdvanceSeconds(now, 0.05f);
+        }
+        synth::Freeze(false);
+        synth::Release(0);
+    }
+    printf("  %d of %d presses broke their own voice\n", broke, kTries);
+    Check("a press is not read as a lean", broke == 0);
+}
+
 static void TestTheKnobDoesNotDragTheTap()
 {
-    printf("turning Delay crossfades taps instead of sliding one\n");
+    printf("turning Delay bends the tap, at a capped rate\n");
     float now = 0.0f;
     synth::Init(kSr, 48);
     wfc::Init(3);
@@ -1710,25 +1766,53 @@ static void TestTheKnobDoesNotDragTheTap()
     synth::Freeze(true);
     Settle(now);
 
-    // Sliding the tap resamples the line and Dopplers everything in it --
-    // that IS the scrubbing, so the test is that the tap never travels: it
-    // holds still, then jumps once the outgoing tap's gain has reached zero.
-    int   crept = 0, jumped = 0, held = 0;
-    float prev = voices::EffDly(0);
+    // This used to demand that the tap never travel at all, on the grounds
+    // that sliding it resamples the line and Dopplers everything in it.
+    // Right diagnosis, wrong quantity: the scrub came from the tap being
+    // stepped once a BLOCK, and once it was interpolated per sample a bend
+    // read as tape rather than as damage. What hurts is RATE. Past 1.0 s of
+    // delay a second the tap walks backwards through the line faster than
+    // the write head fills it, and that reverse scrub is what a fast turn
+    // sounded like, so the cap is the thing worth pinning. Confirmed at the
+    // panel: with the tap frozen and everything else the knob does left
+    // alone, the wash went; capped, it went and the echoes still move.
+    const float blk   = (float)kBlock / kSr;
+    const float cap   = 0.5f * blk;   // kMaxSlew, in seconds of delay a block
+    float       worst = 0.0f;
+    int         moved = 0;
+    const float first = voices::EffDly(0);
+    float       prev  = first;
     for(int i = 0; i < 40; i++)
     {
         synth::SetKnob(0, 0.3f + 0.4f * (float)i / 39.0f);
         for(int b = 0; b < 20; b++)
         {
-            AdvanceSeconds(now, (float)kBlock / kSr);
+            AdvanceSeconds(now, blk);
             const float d = fabsf(voices::EffDly(0) - prev);
             prev          = voices::EffDly(0);
-            if(d < 1e-7f)
-                held++;
-            else if(d < 2e-4f)
-                crept++;
-            else
-                jumped++;
+            if(d > 1e-7f)
+                moved++;
+            if(d > worst)
+                worst = d;
+        }
+    }
+    const float travelled = fabsf(prev - first);
+
+    // And the case the cap is actually for: the knob thrown across its
+    // travel. A slow turn never reaches the cap, so a test that only turns
+    // slowly passes whether the cap is there or not -- raise kMaxSlew a
+    // hundredfold and the slow sweep above does not budge.
+    float fast = 0.0f;
+    for(int i = 0; i < 8; i++)
+    {
+        synth::SetKnob(0, 0.7f - 0.4f * (float)i / 7.0f);
+        for(int b = 0; b < 6; b++)
+        {
+            AdvanceSeconds(now, blk);
+            const float d = fabsf(voices::EffDly(0) - prev);
+            prev          = voices::EffDly(0);
+            if(d > fast)
+                fast = d;
         }
     }
     synth::Freeze(false);
@@ -1738,10 +1822,21 @@ static void TestTheKnobDoesNotDragTheTap()
     // engine rather than relying on where it sits in the list.
     synth::SetKnob(0, 0.6f);
     synth::SetKnob(4, 0.5f);
-    printf("  %d blocks held, %d jumped, %d crept\n", held, jumped, crept);
-    Check("the knob does move the delay", jumped > 10);
-    // Measured 0 creeping blocks; 724 of 800 with the tap glided instead
-    Check("but never drags the tap there", crept < 20);
+    printf("  tap moved in %d of 800 blocks, %.0f ms travelled,"
+           " worst step %.3f ms against a %.3f ms cap\n",
+           moved, travelled * 1000.0f, worst * 1000.0f, cap * 1000.0f);
+    Check("the knob does move the delay", travelled > 0.05f);
+    // The whole point of the cap: one block over it is a reverse scrub
+    printf("  thrown across its travel, worst step %.3f ms\n",
+           fast * 1000.0f);
+    Check("but never faster than the cap", worst <= cap * 1.05f
+                                               && fast <= cap * 1.05f);
+    // Without the cap this sweep steps many times it, which is the tap
+    // walking backwards through the line: the reverse scrub
+    Check("and the cap is what is holding it", fast > cap * 0.5f);
+    // A bend, not a staircase. Stepped once a block the tap moved in well
+    // under half the blocks; glided it moves in nearly all of them.
+    Check("and it bends rather than stepping", moved > 700);
 }
 
 static void TestLowPadsCarryTheBand()
@@ -1884,6 +1979,74 @@ static void TestCableCarries()
     voices::SetCableMode(voices::kCableOff);
 }
 
+static void TestTheCableKnobSetsHowHard()
+{
+    printf("S35 sets how hard a cable is driven\n");
+    // Two halves, because a knob that only steers the solver reads as doing
+    // nothing: the player turns it and waits for a re-roll that may be
+    // seconds away. The multiplier is what answers the hand.
+    Init(3);
+    voices::Init(kSr, kBlock);
+    voices::SetCableMode(voices::kCableFeed);
+    K().safe   = 0.0f;   // no rule may undo the cable
+    K().unrest = 0.0f;
+    K().cable  = 1.0f;
+    RebuildRules();
+    float now = 1.0f;
+    Start(now, 2);
+    Drive(now, 6.0f);
+    BreakRule((int)kCable, 0.0f, now);
+    // The lines ring for seconds, so each reading waits for the last one to
+    // stop colouring it. Nothing is re-solved across the three.
+    Drive(now, 4.0f);
+    const float full = voices::BusLvl(0) + voices::BusLvl(1);
+    K().cable = 0.0f;
+    Drive(now, 4.0f);
+    const float down = voices::BusLvl(0) + voices::BusLvl(1);
+    K().cable = 1.0f;
+    Drive(now, 4.0f);
+    const float back = voices::BusLvl(0) + voices::BusLvl(1);
+    printf("  lines %.4f cabled, %.4f knob down, %.4f back up\n",
+           full, down, back);
+    Check("the knob takes the cable away without a re-solve",
+          down < full * 0.8f);
+    Check("and gives it back", back > down * 1.2f);
+
+    // The other half: what the solver reaches for when it does re-roll.
+    // AMT is {0.3, 0.6, 0.9}, so this is the index it picks, averaged.
+    double mean[2] = {0, 0};
+    for(int pass = 0; pass < 2; pass++)
+    {
+        int n = 0, sum = 0;
+        for(int seed = 1; seed <= 40; seed++)
+        {
+            Init(seed);
+            voices::Init(kSr, kBlock);
+            voices::SetCableMode(voices::kCableFeed);
+            K().safe   = 0.0f;
+            K().unrest = 0.0f;
+            K().cable  = pass ? 1.0f : 0.0f;
+            RebuildRules();
+            float t = 1.0f;
+            Start(t, 2);
+            Drive(t, 2.0f);
+            for(int v = 0; v < kVoices; v++)
+            {
+                const int po = ShownPatch(v);
+                if(po)
+                    sum += OptAmt(po), n++;
+            }
+        }
+        mean[pass] = n ? (double)sum / n : -1.0;
+    }
+    printf("  amount index chosen: %.2f down, %.2f up (of 0..2)\n",
+           mean[0], mean[1]);
+    Check("the knob steers what the solver reaches for",
+          mean[1] > mean[0] + 0.5);
+    K().cable = 1.0f;
+    voices::SetCableMode(voices::kCableOff);
+}
+
 // Mean over the window of the summed shown load, per group
 static void MeanLoad(float& now, float secs, double* out)
 {
@@ -1958,6 +2121,8 @@ int SelfTest()
     TestBreaksFindTheLoudVoice();
     TestTheLedSeesBreaks();
     TestLeaningOnAPadBreaksIt();
+    TestTheCableKnobSetsHowHard();
+    TestAPressDoesNotBreakItself();
     TestTheKnobDoesNotDragTheTap();
 
     if(fails)

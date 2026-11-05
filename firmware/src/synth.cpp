@@ -166,8 +166,8 @@ void SyncSounding(float now)
 const char* KnobName(int i)
 {
     static const char* n[kKnobs]
-        = {"Delay",  "Feedback", "Distortion", "Filter",
-           "Mod",    "Control",  "Unrest",     "Hold"};
+        = {"Delay",   "Feedback", "Distortion", "Filter", "Mod",
+           "Control", "Unrest",   "Hold",       "Cables"};
     return i >= 0 && i < kKnobs ? n[i] : "?";
 }
 
@@ -227,6 +227,15 @@ void SetPressure(int pad, float p)
     {
         rest[pad]    = p;
         rest_at[pad] = now_s;
+        // Disarmed as well as seeded. The panel ramps a pad's pressure by
+        // half the remaining distance every 28 ms, so this first sample is
+        // only half way up the finger's real force and the rest of the
+        // ramp reads as a deliberate lean: measured, every press firmer
+        // than 0.5 broke its own voice, 40 times out of 40, which re-rolled
+        // the tile of the note being played as it spoke. Arming waits for
+        // the finger to settle, which the lean < kLean * 0.4 test below
+        // does once rest has caught up.
+        armed[pad]   = false;
         return;
     }
     const float lean = p - rest[pad];

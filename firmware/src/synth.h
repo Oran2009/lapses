@@ -29,7 +29,7 @@ float PressureRest(int pad);
 bool ShiftOctave(int delta);
 int  Octave();
 
-constexpr int kKnobs = 8;   // HANDOFF 4.2's six, plus Unrest and Space
+constexpr int kKnobs = 9;   // HANDOFF 4.2's six, plus Unrest, Space, Cables
 
 // 0..1 each. Rebuilds the rules and schedules the debounced heal.
 void SetKnob(int i, float v);
