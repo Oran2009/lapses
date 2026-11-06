@@ -40,7 +40,10 @@ float           rest[kPads]     = {};
 float           rest_at[kPads]  = {};
 bool            armed[kPads]    = {};
 
-bool  held[kPads];
+bool  held[kPads], latched[kPads];
+// A latched pad goes on sounding with nothing touching it. Everything that
+// asks "is this pad playing" means this, not the contact.
+inline bool PadActive(int p) { return held[p] || latched[p]; }
 // The octave a pad was pressed at. A pad keeps the pitch it was triggered
 // with until it is released, so shifting the octave leaves what is sounding
 // alone and only applies to the next press.
@@ -154,8 +157,8 @@ void SyncSounding(float now)
         const int v = kPadVoice[p];
         if(v < 0)
             continue;
-        voices::SetPadHeld(v, held[p]);
-        const bool on = held[p] || voices::HoldSustains(v);
+        voices::SetPadHeld(v, PadActive(p));
+        const bool on = PadActive(p) || voices::HoldSustains(v);
         if(on != wfc::Sounding(v))
             wfc::SetSounding(v, on, now);
     }
@@ -166,8 +169,8 @@ void SyncSounding(float now)
 const char* KnobName(int i)
 {
     static const char* n[kKnobs]
-        = {"Delay",   "Feedback", "Distortion", "Filter", "Mod",
-           "Control", "Unrest",   "Hold",       "Cables"};
+        = {"Delay",  "Feedback", "Distortion", "Filter", "Mod",
+           "Control", "Unrest",   "Hold",       "Detune"};
     return i >= 0 && i < kKnobs ? n[i] : "?";
 }
 
@@ -177,7 +180,7 @@ void Init(float sample_rate, int block_size)
     block = block_size;
     for(int p = 0; p < kPads; p++)
     {
-        held[p]     = false;
+        held[p] = latched[p] = false;
         pad_hz[p]   = 0.0f;
         pressure[p] = 0.0f;
         rest[p]     = -1.0f;
@@ -204,17 +207,30 @@ void Init(float sample_rate, int block_size)
 
     wfc::Init(0x5afe6a7du);
     voices::Init(sample_rate, block_size);
+
+    // A voice carries its pad's note from the start. HOLD is a floor under
+    // every voice, pressed or not, and a voice that had never been pressed
+    // still sat on the 220 Hz default -- so raising the fader droned the
+    // untouched pads in unison and it read as one voice sounding out of
+    // seven, until you tapped each one to tune it.
+    //
+    // Not snapped: snapping marks a voice fresh, and seven fresh voices at
+    // boot duck each other for the first seconds. Everything snapping would
+    // set is already at its value here anyway.
+    for(int p = 0; p < kPads; p++)
+        if(kPadVoice[p] >= 0)
+            voices::SetPitch(kPadVoice[p], PadHz(p), 2.0f * RootHz(), false);
 }
 
 float PadHz(int p)
 {
-    if(held[p] && pad_hz[p] > 0.0f)
+    if(PadActive(p) && pad_hz[p] > 0.0f)
         return pad_hz[p];
     return RootHz() * (float)kRatN[p] / (float)kRatD[p];
 }
 
 int  PadVoice(int p) { return kPadVoice[p]; }
-bool PadOn(int p) { return held[p]; }
+bool PadOn(int p) { return PadActive(p); }
 
 void SetPressure(int pad, float p)
 {
@@ -294,9 +310,21 @@ void Release(int pad)
     armed[pad]    = true;
     SyncSounding(now_s);
     const int v = kPadVoice[pad];
-    if(v >= 0)
+    // A latched pad's note did not end, so there is no tail to re-roll
+    if(v >= 0 && !latched[pad])
         wfc::RerollTail(v, now_s);
 }
+
+// S07/S08 down. Called every poll, so pads pressed and let go while it is
+// down keep stacking up; off clears the lot.
+void Latch(bool on)
+{
+    for(int p = 0; p < kPads; p++)
+        latched[p] = on && (latched[p] || held[p]);
+    SyncSounding(now_s);
+}
+
+bool Latched(int p) { return latched[p]; }
 
 bool ShiftOctave(int delta)
 {
@@ -358,16 +386,18 @@ bool            idle        = false;
 void Control(float now)
 {
     now_s = now;
-    // Only a sounding pad can break the silence, so this is the one place
-    // that has to wake the chain
-    for(int p = 0; p < kPads; p++)
-        if(held[p])
+    SyncSounding(now);
+    // Anything that ought to be sounding wakes the chain, and this is the one
+    // place that can. Checking held pads alone left the HOLD fader unable to
+    // wake it: drop the fader, wait out the sleep, and raising it again set
+    // every voice sounding into a chain that was no longer rendering.
+    for(int v = 0; v < wfc::kVoices; v++)
+        if(wfc::Sounding(v))
         {
             idle_blocks = 0;
             idle        = false;
             break;
         }
-    SyncSounding(now);
     wfc::Tick(now);
     voices::Control(now, (float)block / sr);
     for(int v = 0; v < wfc::kVoices; v++)
@@ -442,19 +472,6 @@ void Process(float* l, float* r, int n, const float* in)
     else if(++idle_blocks > (int)(kIdleHold_s * sr / (float)n))
         idle = true;
 }
-
-void SetCableMode(int m)
-{
-    if(m == voices::CableMode_())
-        return;
-    voices::SetCableMode(m);
-    // Settle what is already sounding into the new mode: before this the
-    // switch only took effect on the next press, so you had to release
-    // everything to hear it
-    wfc::Heal(now_s);
-}
-int  CableMode() { return voices::CableMode_(); }
-const char* CableName(int m) { return voices::CableName(m); }
 
 void Break() { wfc::BreakRule(-1, 0.0f, now_s); }
 void Settle() { wfc::Heal(now_s); }

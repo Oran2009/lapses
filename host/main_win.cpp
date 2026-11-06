@@ -9,7 +9,7 @@
 //   octave   Z / X
 //   volume   - / =
 //   knobs    drag with the mouse, or F1..F6 then arrow keys
-//   break    B,   settle  N,   freeze  C,   cables  M
+//   break    B,   settle  N,   freeze  C
 //   panic    escape
 
 #include "synth.h"
@@ -281,49 +281,47 @@ const char  kXpKey[5]  = {'Z', 0, 'X', '-', '='};
 // Engine knob index -> the panel's name, so the window reads like the board
 const char* kKnobLabel[synth::kKnobs]
     = {"S32 delay", "S31 feedback", "S33 distortion", "S34 filter",
-       "S30 mod",   "", "",              "S37 HOLD", "S35 cables"};
+       "S30 mod",   "",             "",               "S37 HOLD",
+       "S35 detune"};
 
-// Panel replica on the left, cards and GUI-only controls to its right
+// Panel replica on the left, cards and GUI-only controls to its right.
+// Seven cards two abreast: one row of seven left the bars narrower than the
+// text column beside them, so each card's meters ran into the next.
 constexpr int kPx = 16, kPy = 16, kPW = 540, kPH = 908;
 constexpr int kRx = kPx + kPW + 24;
-constexpr int kGuiY = 350;
+constexpr int kCardCols = 2, kCardH = 104, kCardGap = 12, kCardTop = 74;
+constexpr int kCardRows = (wfc::kVoices + kCardCols - 1) / kCardCols;
+constexpr int kGuiY = kCardTop + kCardRows * (kCardH + kCardGap) + 16;
 constexpr int kSwW = 140;
-// The panel switches, drawn and clicked as stacked cells, so they behave the
-// way the Touch 2's do rather than as keyboard toggles. Cell 0 is the top.
-// Pos() gives the -1 down / 0 centre / +1 up the engine expects for the one
-// hardware switch left. The second is the voice-model spike and the third
-// is freeze; both exist only here.
+// Drawn and clicked as stacked cells, cell 0 at the top, so the picture
+// matches the hardware. Switches 1 and 2 are the board's two; only the
+// voice-model spike is GUI-only.
 constexpr int kSwitches   = 3;
-constexpr int kSwMaxCells = voices::kModels;
-const int     kSwCells[kSwitches] = {3, voices::kModels, 2};
+constexpr int kSwMaxCells = 3;
+const int     kSwCells[kSwitches] = {voices::kModels, 3, 2};
 Rect          sw_r[kSwitches][kSwMaxCells];
-int           sw_cell[kSwitches] = {1, 0, 0};
-
-inline int Pos(int k) { return 1 - sw_cell[k]; }
+int           sw_cell[kSwitches] = {0, 1, 1};
 
 const char* kSwLabel[kSwitches][kSwMaxCells]
-    = {{"cross-mod", "no cables", "cross-feed"},
-       {},
-       {"live", "freeze"}};
+    = {{}, {"freeze", "--", "latch"}, {"common", "off"}};
 const char* kSwName[kSwitches]
-    = {"S07/S08 cables", "voice model (V)", "freeze (C)"};
+    = {"voice model (V)", "S07/S08 (C)", "S09/S10 (T)"};
 
 // The model cells are named by the engine, so there is one list and not two
 const char* SwLabel(int k, int c)
 {
-    return k == 1 ? voices::ModelName(c) : kSwLabel[k][c];
+    return k == 0 ? voices::ModelName(c) : kSwLabel[k][c];
 }
 
 // Exactly what panel::Poll does with them, so there is one behaviour and not
-// two. Freeze has no hardware switch; it is the fourth cell group here.
+// two.
 
 void ApplySwitches()
 {
-    synth::Freeze(sw_cell[2] != 0);
-    synth::SetCableMode(Pos(0) > 0   ? voices::kCableMod
-                        : Pos(0) < 0 ? voices::kCableFeed
-                                     : voices::kCableOff);
-    voices::SetModel(sw_cell[2]);
+    voices::SetModel(sw_cell[0]);
+    synth::Freeze(sw_cell[1] == 0);
+    synth::Latch(sw_cell[1] == 2);
+    voices::SetCommon(sw_cell[2] == 0);
 }
 
 void Layout()
@@ -333,7 +331,7 @@ void Layout()
     struct Spot { int k; float fx, fy; };
     static const Spot knobs[] = {{1, .2f, .35f}, {0, .4f, .35f}, {2, .6f, .35f},
                                  {3, .8f, .35f}, {4, .2f, .48f},
-                                 {8, .8f, .48f}};
+                                 {8, .4f, .48f}};
     for(const Spot& sp : knobs)
     {
         knob_r[sp.k]    = {X(sp.fx) - 50, Y(sp.fy) - 46, 100, 96};
@@ -358,17 +356,14 @@ void Layout()
         xp_r[i] = i < 3 ? Rect{X(xf[i][0]) - 43, Y(xf[i][1]) - 32, 86, 64}
                         : Rect{X(xf[i][0]) - 54, Y(xf[i][1]) - 22, 108, 44};
 
-    // Both switches sit in the gap under pad row A; S07/S08 is the lower
-    const int base = Y(.585f) + 50;
-    for(int c = 0; c < 3; c++)
-    {
-        sw_r[1][c] = {X(.33f) - kSwW / 2, base + c * 22, kSwW, 22};
-        sw_r[0][c] = {X(.67f) - kSwW / 2, base + 30 + c * 22, kSwW, 22};
-    }
-    for(int k = 2; k < kSwitches; k++)
-        for(int c = 0; c < kSwCells[k]; c++)
-            sw_r[k][c] = {kRx + 16 + (k - 2) * (kSwW + 16),
-                          kGuiY + 52 + c * 22, kSwW, 22};
+    // Both board switches sit on the plate; the model spike is the only one
+    // that belongs in the GUI-only strip
+    for(int c = 0; c < kSwCells[1]; c++)
+        sw_r[1][c] = {X(.72f) - kSwW / 2, Y(.48f) - 24 + c * 22, kSwW, 22};
+    for(int c = 0; c < kSwCells[2]; c++)
+        sw_r[2][c] = {X(.33f) - kSwW / 2, Y(.585f) + 50 + c * 22, kSwW, 22};
+    for(int c = 0; c < kSwCells[0]; c++)
+        sw_r[0][c] = {kRx + 16, kGuiY + 52 + c * 22, kSwW, 22};
 }
 
 void Bar(HDC dc, Rect r, float f, COLORREF c)
@@ -433,15 +428,10 @@ void Box(HDC dc, Rect r, COLORREF c)
     DeleteObject(br);
 }
 
-// The two voice groups read as two families: blue left, green right
-COLORREF Family(int group, bool on)
+// One family now: the two voice groups are gone and GroupOf is always 0
+COLORREF PadFill(bool on)
 {
-    return group ? (on ? RGB(90, 200, 140) : RGB(30, 64, 50))
-                 : (on ? RGB(90, 140, 230) : RGB(30, 44, 76));
-}
-COLORREF FamilyText(int group)
-{
-    return group ? RGB(120, 190, 150) : RGB(130, 160, 220);
+    return on ? RGB(110, 150, 230) : RGB(32, 40, 64);
 }
 
 // One rotary, drawn from a value rather than a knob index: the shifter is
@@ -516,38 +506,30 @@ void Paint(HWND hw)
         snprintf(chg, sizeof(chg), "   CHARGED x%.2f", wfc::ChargeMul());
     snprintf(hdr2, sizeof(hdr2),
              "oct %+d   out %.0f dB   %s   lapse %.2f  "
-             "unrest %.2f/s   cables %s%s",
+             "unrest %.2f/s%s",
              synth::Octave(), synth::GainDb(),
              synth::InputMix() > 0.5f
                      ? "INPUT  "
                      : (synth::Frozen() ? "FROZEN " : "       "), wfc::LapseChance(),
-             wfc::UnrestRate(), synth::CableName(synth::CableMode()), chg);
+             wfc::UnrestRate(), chg);
     Text(dc, kRx, 30, hdr2, dim);
 
     // The voice cards, showing the EFFECTIVE values, knob scaling and mod
     // included, because that is what you hear (principle 8)
-    const int ch = 104, gap = 34, cols = wfc::kGroupSize;
-    const int cw = (W - kRx - 16 - 16 * (cols - 1)) / cols;
+    const int ch = kCardH;
+    const int cw = (W - kRx - 16 - 16 * (kCardCols - 1)) / kCardCols;
     const int lw = 188;   // text column; the bars take the rest of the card
-    auto cardX = [&](int v) { return kRx + (v % cols) * (cw + 16); };
-    auto cardY = [&](int v) { return 74 + wfc::GroupOf(v) * (ch + gap); };
-
-    for(int g = 0; g < wfc::kGroups; g++)
-    {
-        char gl[32];
-        snprintf(gl, sizeof(gl), "%s group", g ? "right" : "left");
-        Text(dc, kRx, cardY(g * cols) - 16, gl, FamilyText(g));
-    }
+    auto cardX = [&](int v) { return kRx + (v % kCardCols) * (cw + 16); };
+    auto cardY
+        = [&](int v) { return kCardTop + (v / kCardCols) * (ch + kCardGap); };
 
     for(int v = 0; v < wfc::kVoices; v++)
     {
         const int x = cardX(v), cy = cardY(v);
         const int bx = x + lw, bw = cw - lw - 8;
         RECT      card = {x, cy, x + cw, cy + ch};
-        const bool rg = wfc::GroupOf(v) != 0;
-        HBRUSH    cb = CreateSolidBrush(
-            wfc::Sounding(v) ? (rg ? RGB(32, 58, 48) : RGB(34, 44, 70))
-                             : (rg ? RGB(22, 32, 28) : RGB(22, 27, 38)));
+        HBRUSH    cb   = CreateSolidBrush(
+            wfc::Sounding(v) ? RGB(34, 44, 70) : RGB(22, 27, 38));
         FillRect(dc, &card, cb);
         DeleteObject(cb);
 
@@ -605,45 +587,7 @@ void Paint(HWND hw)
         Text(dc, bx, cy + 58, "pan", dim);
         Centred(dc, {bx + 34, cy + 60, bw - 34, 8}, voices::Pan(v),
                 RGB(130, 170, 200));
-
-        const int tgt = wfc::OptTarget(wfc::ShownPatch(v));
-        if(tgt >= 0)
-        {
-            snprintf(s, sizeof(s), "cable>v%d x%.2f", tgt + 1,
-                     wfc::AMT[wfc::OptAmt(wfc::ShownPatch(v))]);
-            Text(dc, bx, cy + 76, s, ok);
-        }
     }
-
-    // Bridges bypass the solver, so they come from the voices matrix and not
-    // from OptTarget. Effective, not commanded, so they fade with the sound.
-    for(int src = 0; src < wfc::kVoices; src++)
-        for(int dst = 0; dst < wfc::kVoices; dst++)
-        {
-            if(wfc::GroupOf(src) == wfc::GroupOf(dst))
-                continue;
-            const float e = voices::CableEff(src, dst);
-            if(e < 0.01f)
-                continue;
-            const float f = e > 1.0f ? 1.0f : e;
-            // src above, so a bridge leaves its bottom edge; the reverse
-            // direction is nudged so the pair does not draw as one line
-            const int up = wfc::GroupOf(src) == 0, off = up ? -8 : 8;
-            const int x0 = cardX(src) + cw / 2 + off, x1 = cardX(dst) + cw / 2 + off;
-            const int y0 = up ? cardY(src) + ch : cardY(src);
-            const int y1 = up ? cardY(dst) : cardY(dst) + ch;
-            const COLORREF bc = RGB(30 + (int)(210 * f), 30 + (int)(150 * f), 30);
-            HPEN   pen = CreatePen(PS_SOLID, 1 + (int)(3 * f), bc);
-            HPEN   op  = (HPEN)SelectObject(dc, pen);
-            MoveToEx(dc, x0, y0, nullptr);
-            LineTo(dc, x1, y1);
-            SelectObject(dc, op);
-            DeleteObject(pen);
-            HBRUSH hb = CreateSolidBrush(bc);
-            RECT   head = {x1 - 4, y1 - 4, x1 + 4, y1 + 4};
-            FillRect(dc, &head, hb);
-            DeleteObject(hb);
-        }
 
     // The panel plate, then the GUI-only strip, so the two never blur together
     {
@@ -661,7 +605,7 @@ void Paint(HWND hw)
         Text(dc, kRx + 8, kGuiY + 6, "GUI ONLY - not on the panel", RGB(200, 180, 100));
         Text(dc, kRx + 16, kGuiY + 130,
              "pads A S D F G H J / 1-7   oct Z X   vol - =   break B   "
-             "settle N   cables M   F1-F8 + arrows: knob",
+             "settle N   switches V C T   F1-F9 + arrows: knob",
              dim);
     }
 
@@ -707,11 +651,11 @@ void Paint(HWND hw)
 
     for(int p = 0; p < synth::kPads; p++)
     {
-        const bool on  = synth::PadOn(p);
-        const int  v   = synth::PadVoice(p);
-        const int  grp = wfc::GroupOf(v);
-        Box(dc, pad_r[p], Family(grp, on));
-        const COLORREF tc = on ? RGB(255, 255, 255) : FamilyText(grp);
+        const bool on = synth::PadOn(p);
+        const int  v  = synth::PadVoice(p);
+        Box(dc, pad_r[p], PadFill(on));
+        const COLORREF tc
+            = on ? RGB(255, 255, 255) : RGB(130, 160, 220);
         char s[48];
         snprintf(s, sizeof(s), "P%02d  %c", p + 3, (char)kPadKey[p]);
         Text(dc, pad_r[p].x + 6, pad_r[p].y + 6, s, tc);
@@ -796,11 +740,11 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
             if(w == 'N')
                 synth::Settle();
             if(w == 'V')
-                sw_cell[1] = (sw_cell[1] + 1) % kSwCells[1];   // spike
-            if(w == 'M')
-                sw_cell[1] = (sw_cell[1] + 2) % 3;   // cables
+                sw_cell[0] = (sw_cell[0] + 1) % kSwCells[0];   // spike
             if(w == 'C')
-                sw_cell[3] = 1 - sw_cell[3];
+                sw_cell[1] = (sw_cell[1] + 1) % kSwCells[1];
+            if(w == 'T')
+                sw_cell[2] = 1 - sw_cell[2];
             {
                 const int xi = w == 'Z' ? 0 : w == 'X' ? 2
                                : w == VK_OEM_MINUS ? 3 : w == VK_OEM_PLUS ? 4 : -1;
@@ -810,7 +754,7 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
                     xp_on[xi] = true;
                 }
             }
-            if(w >= VK_F1 && w <= VK_F8)
+            if(w >= VK_F1 && w < VK_F1 + synth::kKnobs)
                 sel_knob = (int)w - VK_F1;
             if((w == VK_LEFT || w == VK_RIGHT) && sel_knob >= 0)
                 synth::SetKnob(sel_knob,
@@ -821,7 +765,6 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
             {
                 for(int p = 0; p < synth::kPads; p++)
                     synth::Release(p);
-                sw_cell[0] = 1;
             }
             InvalidateRect(hw, nullptr, FALSE);
             return 0;

@@ -128,7 +128,6 @@ static void TestKnobFormulas()
     Near("Lpeak", Lim().Lpeak, 0.98f);
     Near("gap", Lim().gap, 0.0152f);
     Check("ratioOn at .7", Lim().ratio_on);
-    Check("cycleOn at .7", Lim().cycle_on);
 
     // The thresholds the strictness knob crosses
     K().unrest = 1.0f;
@@ -136,7 +135,6 @@ static void TestKnobFormulas()
     RebuildRules();
     Check("Fself off when loose", Lim().Fself > 8.0f);
     Check("ratioOn off when loose", !Lim().ratio_on);
-    Check("cycleOn off when loose", !Lim().cycle_on);
     Check("Lpeak off when loose", Lim().Lpeak > 8.0f);
     Near("lapseChance at full unrest", LapseChance(), 0.5f);
     Near("unrestRate at full unrest", UnrestRate(), 0.25f);
@@ -278,18 +276,13 @@ static void TestPressIsLegal()
 static void TestBreaksBreakAndHeal()
 {
     printf("each break breaks its own rule, and heal takes it back\n");
-    const BreakType types[kBreakTypes]
-        = {kEcho, kSwell, kFuzz, kFlood, kCable};
+    const BreakType types[kBreakTypes] = {kEcho, kSwell, kFuzz};
     for(int ti = 0; ti < kBreakTypes; ti++)
     {
         int hit = 0, clean_after = 0;
         for(uint32_t seed = 1; seed <= 40; seed++)
         {
             Init(seed);
-            // The cable breaks need somewhere for a cable to exist
-            voices::SetCableMode(types[ti] == kCable || types[ti] == kFlood
-                                     ? voices::kCableFeed
-                                     : voices::kCableOff);
             K().safe = 0.95f;
             K().unrest = 0.0f;
             K().mod = 1.0f;
@@ -316,7 +309,7 @@ static void TestBreaksBreakAndHeal()
                            Broken((BreakType)q));
                 int undeliv = 0;
                 for(int v = 0; v < kVoices; v++)
-                    if(Tile(v) != ShownTile(v) || Patch(v) != ShownPatch(v))
+                    if(Tile(v) != ShownTile(v))
                         undeliv++;
                 printf(" undelivered=%d dropped=%d", undeliv,
                        EventsDropped());
@@ -341,7 +334,6 @@ static void TestBreaksBreakAndHeal()
                BreakName(types[ti]), hit, clean_after);
         Check("break is audible as its own rule", hit >= 38);
         Check("heal clears the break", clean_after >= 38);
-        voices::SetCableMode(voices::kCableOff);
     }
 }
 
@@ -542,35 +534,6 @@ static void TestRule3DistinctEchoes()
     Check("all seven echoes separate at a long delay", fits[2] == 7);
 }
 
-// A voice never patches into itself, and strict WFC allows no cable loop
-static void TestCableStructure()
-{
-    printf("cables: no self patch, no loop when strict\n");
-    for(int g = 0; g < kGroups; g++)
-    {
-        for(uint32_t seed = 1; seed <= 60; seed++)
-        {
-            const int base = g * kGroupSize;
-            Init(seed);
-            K().safe = 0.95f;
-            K().unrest = 0.0f;
-            RebuildRules();
-            float now = 1.0f;
-            for(int v = base; v < base + kGroupSize; v++)
-            {
-                SetSounding(v, true, now);
-                now += 0.01f;
-                Pass(v, now);
-            }
-            Settle(now);
-            for(int v = base; v < base + kGroupSize; v++)
-                Check("no voice patches into itself",
-                      OptTarget(ShownPatch(v)) != v);
-            Check("no cable loop when strict", Broken(kCable) == 0);
-        }
-    }
-}
-
 constexpr float kSr    = 32000.0f;   // what the board runs at
 constexpr int   kBlock = 48;
 
@@ -642,8 +605,7 @@ static bool FiniteOutput()
 static bool ShownStateValid()
 {
     for(int v = 0; v < kVoices; v++)
-        if(ShownTile(v) < 0 || ShownTile(v) >= kTiles || ShownPatch(v) < 0
-           || ShownPatch(v) >= kOpts || ShownMod(v) < 0
+        if(ShownTile(v) < 0 || ShownTile(v) >= kTiles || ShownMod(v) < 0
            || ShownMod(v) >= kModOpts)
             return false;
     return true;
@@ -724,12 +686,10 @@ static void TestLoneVoiceInGroup()
     float now = 0.0f;
     synth::Init(kSr, 48);
     synth::SetKnob(5, 1.0f);   // Control: strictest
-    synth::SetCableMode(voices::kCableFeed);
     synth::Press(0);
     Settle(now);
     Violation vio[kVoices * kVoices + kVoices];
     Check("a lone voice is legal", Diagnose(vio, (int)(sizeof(vio) / sizeof(vio[0]))) == 0);
-    synth::SetCableMode(voices::kCableOff);
 }
 
 // The line input is detected, not switched, so the detector is the contract
@@ -946,171 +906,6 @@ static void TestModulator()
     Check("the follower actually moves", swing > 0.3f);
 }
 
-// Rule 6 only exists while the cables are switched to a mode
-static void TestCableModes()
-{
-    printf("cables off means none, cables on means nobody left out\n");
-    voices::SetCableMode(voices::kCableOff);
-    int patched = 0;
-    for(uint32_t seed = 1; seed <= 40; seed++)
-    {
-        Init(seed);
-        voices::Init(kSr, kBlock);
-        K().unrest = 0.0f;
-        K().safe   = 0.7f;
-        RebuildRules();
-        float now = 1.0f;
-        Start(now, kVoices);
-        Heal(now);
-        for(int b2 = 0; b2 < 400; b2++) { now += 0.05f; Tick(now); }
-        for(int v = 0; v < kVoices; v++)
-            if(ShownPatch(v))
-                patched++;
-    }
-    Check("no cable exists while they are off", patched == 0);
-
-    for(int m = (int)voices::kCableFeed; m < (int)voices::kCableCount; m++)
-    {
-        voices::SetCableMode(m);
-        int isolated = 0, runs = 0;
-        float worst = 0.0f;
-        bool  finite = true;
-        for(uint32_t seed = 1; seed <= 40; seed++)
-        {
-            Init(seed);
-            voices::Init(kSr, kBlock);
-            voices::SetCableMode(m);
-            K().unrest = 0.0f;
-            K().fb     = 1.0f;
-            K().drive  = 1.0f;
-            K().safe   = 0.7f;
-            RebuildRules();
-            float now = 1.0f;
-            Start(now, kVoices);
-            Heal(now);
-            for(int b2 = 0; b2 < 400; b2++) { now += 0.05f; Tick(now); }
-            // Every sounding voice must send or receive
-            for(int v = 0; v < kVoices; v++)
-            {
-                bool touched = ShownPatch(v) != 0;
-                for(int j = 0; j < kVoices && !touched; j++)
-                    if(j != v && ShownPatch(j)
-                       && OptTarget(ShownPatch(j)) == v)
-                        touched = true;
-                if(!touched)
-                    isolated++;
-                runs++;
-            }
-            const Run r = Drive(now, 1.5f);
-            if(!r.finite)
-                finite = false;
-            if(r.peak > worst)
-                worst = r.peak;
-        }
-        printf("  %-4s isolated %d/%d   worst peak %.2f\n",
-               voices::CableName(m), isolated, runs, worst);
-        Check("nobody is isolated once settled", isolated == 0);
-        Check("finite", finite);
-        Check("bounded", worst < 2.0f);
-    }
-    voices::SetCableMode(voices::kCableOff);
-}
-
-// The cable rules that differ by mode: feed stays acyclic and gain-budgeted,
-// mod is allowed to couple voices into rings
-static void TestCableRules()
-{
-    printf("feed and mod do not get the same cable rules\n");
-    for(int m = (int)voices::kCableFeed; m < (int)voices::kCableCount; m++)
-    {
-        int cycles = 0, overfed = 0, overfanned = 0, split = 0, runs = 0;
-        for(uint32_t seed = 1; seed <= 60; seed++)
-        {
-            Init(seed);
-            voices::Init(kSr, kBlock);
-            voices::SetCableMode(m);
-            K().unrest = 0.0f;
-            K().safe   = 0.9f;   // every cable limit binding, connected on
-            RebuildRules();
-            float now = 1.0f;
-            Start(now, kVoices);
-            Heal(now);
-            for(int b2 = 0; b2 < 400; b2++) { now += 0.05f; Tick(now); }
-
-            float in_amt[kVoices] = {};
-            int   in_deg[kVoices] = {};
-            for(int v = 0; v < kVoices; v++)
-                if(ShownPatch(v))
-                {
-                    const int t = OptTarget(ShownPatch(v));
-                    in_amt[t] += AMT[OptAmt(ShownPatch(v))];
-                    in_deg[t]++;
-                }
-            for(int v = 0; v < kVoices; v++)
-            {
-                if(in_deg[v] > Lim().fan_in)
-                    overfanned++;
-                if(FL[TileF(ShownTile(v))] * FbMul() + in_amt[v]
-                   > Lim().Iflood + 1e-3f)
-                    overfed++;
-                // Walk the chain from v and see whether it returns
-                int cur = v;
-                for(int step = 0; step < kVoices; step++)
-                {
-                    if(!ShownPatch(cur))
-                        break;
-                    cur = OptTarget(ShownPatch(cur));
-                    if(cur == v)
-                    {
-                        cycles++;
-                        break;
-                    }
-                }
-            }
-            // One structure per group, reachable either way round
-            for(int g = 0; g < kGroups; g++)
-            {
-                bool seen[kVoices] = {};
-                int  stack[kVoices], ns = 0, reached = 1;
-                const int first = g * kGroupSize;
-                stack[ns++]  = first;
-                seen[first]  = true;
-                while(ns)
-                {
-                    const int cur = stack[--ns];
-                    for(int w = first; w < first + kGroupSize; w++)
-                    {
-                        if(seen[w]) continue;
-                        const bool linked
-                            = (ShownPatch(cur)
-                               && OptTarget(ShownPatch(cur)) == w)
-                              || (ShownPatch(w)
-                                  && OptTarget(ShownPatch(w)) == cur);
-                        if(linked)
-                        { seen[w] = true; stack[ns++] = w; reached++; }
-                    }
-                }
-                if(reached < kGroupSize)
-                    split++;
-            }
-            runs++;
-        }
-        printf("  %-4s cycles %d  over budget %d  over fan-in %d  split %d"
-               "  (of %d runs)\n",
-               voices::CableName(m), cycles, overfed, overfanned, split, runs);
-        if(m == (int)voices::kCableFeed)
-        {
-            Check("feed stays acyclic", cycles == 0);
-            Check("feed respects the flood budget", overfed == 0);
-        }
-        Check("the fan-in cap holds", overfanned == 0);
-        Check("one structure, not two", split == 0);
-    }
-    voices::SetCableMode(voices::kCableOff);
-    K().safe = 0.7f;
-    RebuildRules();
-}
-
 static void TestNeverBlowsUp()
 {
     printf("never blows up, anywhere in the knob space\n");
@@ -1129,6 +924,10 @@ static void TestNeverBlowsUp()
         K().mod    = corner ? 1.0f : (float)(seed % 4) / 3.0f;
         K().safe   = corner ? 0.0f : (float)(seed % 13) / 12.0f;
         K().unrest = 0.0f;
+        // Detune and the common line are in the loop too, so they belong in
+        // the sweep: half the seeds carry the line, corners carry both at full
+        K().detune = corner ? 1.0f : (float)(seed % 6) / 5.0f;
+        voices::SetCommon((seed % 2) == 0);
         RebuildRules();
 
         float now = 1.0f;
@@ -1159,6 +958,8 @@ static void TestNeverBlowsUp()
     printf("  worst peak %.2f (seed %d) -- what the master limiter must take\n",
            worst_peak, worst_seed);
     Check("bounded everywhere", worst_peak < 50.0f);
+    voices::SetCommon(false);
+    K().detune = 0.0f;
 }
 
 // Rule 1 says a loop above 1.0 rings by itself. The swell break sets exactly
@@ -1487,7 +1288,7 @@ static int TilesAfter(float& now, bool squeeze, int seed)
     return after != before;
 }
 
-// Everything sounding and cabled, which is the worst case the board renders.
+// Everything sounding, which is the worst case the board renders.
 // Relative numbers only: this is an x86 host and the Daisy keeps its delay
 // lines in SDRAM. Best of several runs -- a single run varies by over 10%
 // here, which is wider than most of the differences worth measuring.
@@ -1500,7 +1301,6 @@ static double BenchOne()
         float now = 0.0f;
         synth::Init(kSr, 48);
         wfc::Init(5);
-        voices::SetCableMode(voices::kCableFeed);
         for(int p = 0; p < synth::kPads; p++)
             synth::Press(p);
         AdvanceSeconds(now, 2.0f);
@@ -1518,7 +1318,6 @@ static double BenchOne()
               * 1e9 / (double)(kBlocks * kBlock);
         if(ns < best)
             best = ns;
-        voices::SetCableMode(voices::kCableOff);
         for(int p = 0; p < synth::kPads; p++)
             synth::Release(p);
     }
@@ -1609,9 +1408,7 @@ static void TestBreaksFindTheLoudVoice()
             synth::Release(p);
     }
     printf("  the loud voice moved in %d of %d breaks\n", loud_hit, kRuns);
-    // Measured 40 of 60 weighted against 23 of 60 picking flat. Not 60 of
-    // 60 because the cable break moves a patch and not a tile, so the voice
-    // it lands on shows no tile change at all.
+    // Measured 40 of 60 weighted against 23 of 60 picking flat.
     Check("the loud one is the usual victim", loud_hit >= 32);
 }
 
@@ -1949,102 +1746,152 @@ static void TestSwellRings()
           swollen > plain);
 }
 
-// A cable must actually carry audio: voice 0 patched into voice 1 has to
-// reach voice 1's line even when only voice 0 is making sound.
-static void TestCableCarries()
+// Mod bends the target's partials, which lands as sidebands above them. The
+// phase offset goes through a cast and a clamp, and if it came out zero
+// every other test here would still pass, so this is the one that says the
+// mode does anything at all.
+// The HOLD fader has to be able to wake the instrument on its own. With it
+// down and no pad held the chain goes to sleep after a few seconds of
+// silence, and raising the fader then has to bring the drone back without a
+// press -- it used to need one, which left the instrument dead in the hand.
+// HOLD is a floor under every voice, so a voice can be made to sound without
+// ever having been pressed -- and Press was the only thing that tuned one.
+static void TestEveryVoiceIsTunedBeforeItIsPlayed()
 {
-    printf("a cable carries audio into the target's line\n");
-    Init(3);
-    voices::Init(kSr, kBlock);
-    voices::SetCableMode(voices::kCableFeed);
-    K().safe   = 0.0f;   // no rule may undo the cable
-    K().unrest = 0.0f;
-    RebuildRules();
-    float now = 1.0f;
-    Start(now, 2);
-    Drive(now, 6.0f);   // past the press presence, which would skew both runs
-    const Run   before = Drive(now, 0.8f);
-    const float lvl0   = voices::BusLvl(0) + voices::BusLvl(1);
-    // Cross-patch them at the strongest amount, which is the cable break
-    BreakRule((int)kCable, 0.0f, now);
-    const Run   after = Drive(now, 1.2f);
-    const float lvl1  = voices::BusLvl(0) + voices::BusLvl(1);
-    printf("  line level %.4f -> %.4f (summed output %.4f -> %.4f)\n",
-           lvl0, lvl1, before.rms, after.rms);
-    Check("finite with cables live", after.finite);
-    // The lines, not the summed output: two lines fed into each other are
-    // correlated, so the sum can read lower through cancellation while both
-    // lines carry more. Measuring the sum made this test a pitch lottery.
-    Check("cross-patching feeds the lines", lvl1 > lvl0);
-    voices::SetCableMode(voices::kCableOff);
+    printf("a voice carries its pad's note before it is ever pressed\n");
+    synth::Init(kSr, kBlock);
+    int off = 0;
+    for(int p = 0; p < synth::kPads; p++)
+    {
+        const int v = synth::PadVoice(p);
+        if(v >= 0 && fabsf(voices::Pitch(v) - synth::PadHz(p)) > 0.01f)
+            off++;
+    }
+    printf("  %d of %d voices off their pad's note, untouched\n", off,
+           synth::kPads);
+    Check("every voice is already on its own note", off == 0);
 }
 
-static void TestTheCableKnobSetsHowHard()
+// DETUNE slides the loop off the whole number of voice periods it is snapped
+// to. Measured where the mechanism actually lives -- the effective delay in
+// periods of the voice's own note -- because the timbre change is a comb
+// moving a couple of milliseconds, which no band measure here can separate
+// from the wash.
+static void TestDetuneSlidesTheLoopOffTheNote()
 {
-    printf("S35 sets how hard a cable is driven\n");
-    // Two halves, because a knob that only steers the solver reads as doing
-    // nothing: the player turns it and waits for a re-roll that may be
-    // seconds away. The multiplier is what answers the hand.
-    Init(3);
-    voices::Init(kSr, kBlock);
-    voices::SetCableMode(voices::kCableFeed);
-    K().safe   = 0.0f;   // no rule may undo the cable
-    K().unrest = 0.0f;
-    K().cable  = 1.0f;
-    RebuildRules();
-    float now = 1.0f;
-    Start(now, 2);
-    Drive(now, 6.0f);
-    BreakRule((int)kCable, 0.0f, now);
-    // The lines ring for seconds, so each reading waits for the last one to
-    // stop colouring it. Nothing is re-solved across the three.
-    Drive(now, 4.0f);
-    const float full = voices::BusLvl(0) + voices::BusLvl(1);
-    K().cable = 0.0f;
-    Drive(now, 4.0f);
-    const float down = voices::BusLvl(0) + voices::BusLvl(1);
-    K().cable = 1.0f;
-    Drive(now, 4.0f);
-    const float back = voices::BusLvl(0) + voices::BusLvl(1);
-    printf("  lines %.4f cabled, %.4f knob down, %.4f back up\n",
-           full, down, back);
-    Check("the knob takes the cable away without a re-solve",
-          down < full * 0.8f);
-    Check("and gives it back", back > down * 1.2f);
-
-    // The other half: what the solver reaches for when it does re-roll.
-    // AMT is {0.3, 0.6, 0.9}, so this is the index it picks, averaged.
-    double mean[2] = {0, 0};
-    for(int pass = 0; pass < 2; pass++)
+    printf("DETUNE walks the loop off a whole number of the note's periods\n");
+    double frac[2] = {};
+    for(int d = 0; d < 2; d++)
     {
-        int n = 0, sum = 0;
-        for(int seed = 1; seed <= 40; seed++)
-        {
-            Init(seed);
-            voices::Init(kSr, kBlock);
-            voices::SetCableMode(voices::kCableFeed);
-            K().safe   = 0.0f;
-            K().unrest = 0.0f;
-            K().cable  = pass ? 1.0f : 0.0f;
-            RebuildRules();
-            float t = 1.0f;
-            Start(t, 2);
-            Drive(t, 2.0f);
-            for(int v = 0; v < kVoices; v++)
-            {
-                const int po = ShownPatch(v);
-                if(po)
-                    sum += OptAmt(po), n++;
-            }
-        }
-        mean[pass] = n ? (double)sum / n : -1.0;
+        synth::Init(kSr, kBlock);
+        wfc::Init(5);
+        K().detune = d ? 1.0f : 0.0f;
+        // Mod off: it adds to the delay too, and its wobble puts the tap
+        // anywhere between the periods while it runs
+        K().mod    = 0.0f;
+        float now  = 1.0f;
+        synth::Press(0);
+        // Long enough for the tap glide to arrive at the new distance
+        AdvanceSeconds(now, 4.0f);
+        const int    v = synth::PadVoice(0);
+        const double p = (double)voices::EffDly(v) * voices::Pitch(v);
+        frac[d]        = p - floor(p);
+        printf("  detune %.0f: loop is %.3f periods, %.3f of one over\n",
+               d ? 1.0f : 0.0f, p, frac[d]);
+        synth::Release(0);
     }
-    printf("  amount index chosen: %.2f down, %.2f up (of 0..2)\n",
-           mean[0], mean[1]);
-    Check("the knob steers what the solver reaches for",
-          mean[1] > mean[0] + 0.5);
-    K().cable = 1.0f;
-    voices::SetCableMode(voices::kCableOff);
+    // Snapped lands on a whole period either side of zero, so measure the
+    // distance to the nearest whole one, not the fraction itself
+    const double off0 = frac[0] < 0.5 ? frac[0] : 1.0 - frac[0];
+    Check("at zero the loop is still snapped to the note", off0 < 0.05);
+    Check("at full it sits half a period off", fabs(frac[1] - 0.5) < 0.08);
+    K().detune = 0.0f;
+}
+
+// LATCH keeps the pads that were down when the switch went down, and takes
+// anything pressed afterwards with them.
+static void TestLatchKeepsThePadsDown()
+{
+    printf("LATCH holds the pads that were down, and collects new ones\n");
+    synth::Init(kSr, kBlock);
+    wfc::Init(5);
+    float now = 1.0f;
+    synth::Press(0);
+    AdvanceSeconds(now, 0.5f);
+    synth::Latch(true);
+    synth::Release(0);
+    AdvanceSeconds(now, 0.5f);
+    const bool kept = synth::PadOn(0) && wfc::Sounding(synth::PadVoice(0));
+    // Pressed and let go while the switch is down: the latch is read every
+    // poll, so it collects this one too
+    synth::Press(3);
+    AdvanceSeconds(now, 0.3f);
+    synth::Latch(true);
+    synth::Release(3);
+    AdvanceSeconds(now, 0.3f);
+    const bool got = synth::PadOn(3);
+    synth::Latch(false);
+    AdvanceSeconds(now, 0.2f);
+    const bool cleared = !synth::PadOn(0) && !synth::PadOn(3);
+    printf("  kept %d, collected %d, cleared on release %d\n", (int)kept,
+           (int)got, (int)cleared);
+    Check("the released pad stays down", kept);
+    Check("a pad pressed while latched joins it", got);
+    Check("letting the switch go drops them all", cleared);
+}
+
+// THE COMMON LINE is one delay every voice feeds and reads, so a voice with
+// nothing touching it still rings with what the rest of the instrument is
+// doing. That is the whole claim, and an untouched voice's own line level is
+// where to read it.
+static void TestCommonLineRingsTheUntouchedVoices()
+{
+    printf("the common line rings the voices nobody is touching\n");
+    double quiet[2] = {};
+    bool   ok[2]    = {};
+    for(int on = 0; on < 2; on++)
+    {
+        synth::Init(kSr, kBlock);
+        wfc::Init(5);
+        K().fb = 0.8f;
+        voices::SetCommon(on != 0);
+        float now = 1.0f;
+        synth::Press(0);
+        AdvanceSeconds(now, 4.0f);
+        // Every voice but pad 0's: none of them has been touched
+        const int held = synth::PadVoice(0);
+        for(int v = 0; v < wfc::kVoices; v++)
+            if(v != held)
+                quiet[on] += voices::LoopLevel(v);
+        ok[on] = FiniteOutput();
+        printf("  common %s: untouched voices sum %.5f, finite %d\n",
+               on ? "on " : "off", quiet[on], (int)ok[on]);
+        synth::Release(0);
+        voices::SetCommon(false);
+    }
+    Check("off, the untouched voices are silent", quiet[0] < 1.0e-4);
+    Check("on, they ring", quiet[1] > 1.0e-3);
+    Check("and the whole thing stays bounded", ok[0] && ok[1]);
+}
+
+static void TestHoldWakesTheChain()
+{
+    printf("the HOLD fader wakes the chain by itself\n");
+    synth::Init(kSr, kBlock);
+    wfc::Init(3);
+    K().hold = 0.0f;
+    float now = 1.0f;
+    synth::Press(0);
+    AdvanceSeconds(now, 1.0f);
+    synth::Release(0);
+    // Long enough for the tail to die and the sleep to engage
+    AdvanceSeconds(now, 20.0f);
+    const double asleep = WindowRms(now, 0.5f);
+    K().hold = 0.8f;
+    const double woke = WindowRms(now, 3.0f);
+    printf("  rms %.6f asleep, %.6f after the fader comes up\n", asleep, woke);
+    Check("the fader brings the drone back with no press", woke > 0.01);
+    K().hold = 0.0f;
 }
 
 // Mean over the window of the summed shown load, per group
@@ -2091,7 +1938,6 @@ int SelfTest()
     TestWaveIsStaggered();
     TestKnobsLoadTheirRule();
     TestRule3DistinctEchoes();
-    TestCableStructure();
     TestPadsAndVoices();
     TestLoneVoiceInGroup();
     TestEventQueueHolds();
@@ -2102,8 +1948,6 @@ int SelfTest()
     TestSilence();
     TestSounds();
     TestModulator();
-    TestCableModes();
-    TestCableRules();
     TestNeverBlowsUp();
 
     TestTheDuckTargetsALevel();
@@ -2113,7 +1957,6 @@ int SelfTest()
     TestRippleStagger();
     TestBreakIsAGesture();
     TestSwellRings();
-    TestCableCarries();
     // Last: it ends 20 s into its own timeline and several tests below
     // inherit knob and timing state rather than setting their own
     Bench();
@@ -2121,7 +1964,11 @@ int SelfTest()
     TestBreaksFindTheLoudVoice();
     TestTheLedSeesBreaks();
     TestLeaningOnAPadBreaksIt();
-    TestTheCableKnobSetsHowHard();
+    TestEveryVoiceIsTunedBeforeItIsPlayed();
+    TestDetuneSlidesTheLoopOffTheNote();
+    TestLatchKeepsThePadsDown();
+    TestCommonLineRingsTheUntouchedVoices();
+    TestHoldWakesTheChain();
     TestAPressDoesNotBreakItself();
     TestTheKnobDoesNotDragTheTap();
 

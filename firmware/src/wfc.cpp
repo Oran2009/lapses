@@ -36,7 +36,7 @@ inline float Smooth(float a, float b, float x)
     return k * k * (3.0f - 2.0f * k);
 }
 
-Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f, 1.0f};
+Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f, 0.0f};
 bool   frozen = false;
 // How a wave travels: the gap between one voice changing and the next, and,
 // past kSpread, whether it carries into the other group. It had a fader of
@@ -53,8 +53,6 @@ float  ripple = 0.02f;
 // once a block. wfc cannot ask voices directly -- voices is the layer above
 // -- and a break needs it to avoid landing on something inaudible.
 float  level[kVoices] = {};
-int    cable_mode = 0;   // 0 none, 1 feed, 2 mod
-const int* rp_tiles = nullptr;   // the tiles the patch search weighs
 Limits limits = {};
 
 // The rule tables, rebuilt on every knob move: which tiles may sit beside
@@ -69,12 +67,10 @@ void EnsureTables();
 
 // Logical: what WFC has decided. Shown: what the audio has reached.
 int16_t tile[kVoices], shown_tile[kVoices];
-int8_t  patch[kVoices], shown_patch[kVoices];
 int8_t  mod_opt[kVoices], shown_mod[kVoices];
 uint8_t skew[kVoices], shown_skew[kVoices];
 // Per field, so an older event in the wave never overwrites a newer one
-int32_t seq_tile[kVoices], seq_patch[kVoices], seq_mod[kVoices],
-    seq_skew[kVoices];
+int32_t seq_tile[kVoices], seq_mod[kVoices], seq_skew[kVoices];
 int32_t seq = 0;
 
 bool  sounding[kVoices];
@@ -88,9 +84,9 @@ bool  broke = false;
 // A change the wave carries. -1 means the field is not part of it.
 struct Change
 {
-    int tile, patch, mod, skew;
+    int tile, mod, skew;
 };
-inline Change NoChange() { return Change{-1, -1, -1, -1}; }
+inline Change NoChange() { return Change{-1, -1, -1}; }
 
 struct Event
 {
@@ -205,137 +201,6 @@ inline bool InList(const int* a, int n, int v)
 }
 
 // ---------------------------------------------------------------- the rules
-
-// `in_amt` is the cable depth arriving at this voice, which only counts in
-// How much cable is arriving at each sounding voice, as a sum of amounts.
-// Feed spends it as gain, mod spends it as modulation depth, so the two modes
-// budget the same number against different rules.
-void InAmounts(const int8_t* pa, const int* act, int n, float* in_amt,
-               int* in_deg)
-{
-    for(int i = 0; i < n; i++)
-    {
-        in_amt[act[i]] = 0.0f;
-        in_deg[act[i]] = 0;
-    }
-    for(int i = 0; i < n; i++)
-    {
-        const int o = pa[act[i]];
-        if(!o)
-            continue;
-        const int t = OptTarget(o);
-        if(!InList(act, n, t))
-            continue;
-        in_amt[t] += AMT[OptAmt(o)];
-        in_deg[t]++;
-    }
-}
-
-// The cable rules. Rule 4 is the old one -- no self patch ever, and no cycle
-// when strict -- but the cycle half is FEED ONLY: audio going round a ring
-// multiplies gain on top of each voice's own feedback, while modulation going
-// round a ring is a pair of coupled oscillators and is the whole attraction.
-//
-// Rule 6 is the cable cover: nobody sounding is left out of the patching, and
-// at high strictness they must all be in ONE structure rather than two.
-//
-// Rule 7 is the per-voice gain budget, feed only: a voice may not be both
-// self-ringing and heavily fed (break type `flood`). Mod has no budget --
-// nothing constrains modulation depth.
-bool PatchesOK(const int8_t* pa, const int* act, int n, const int* tiles)
-{
-    for(int i = 0; i < n; i++)
-    {
-        const int o = pa[act[i]];
-        if(o && OptTarget(o) == act[i])
-            return false;
-    }
-    if(!cable_mode)
-    {
-        // Switched off, the only cable that may exist is no cable
-        for(int i = 0; i < n; i++)
-            if(pa[act[i]])
-                return false;
-        return true;
-    }
-
-    float in_amt[kVoices];
-    int   in_deg[kVoices];
-    InAmounts(pa, act, n, in_amt, in_deg);
-
-    // Rule 6: an edge cover. A single voice cannot patch to anything, so
-    // there is nothing to ask of it.
-    if(n >= 2)
-        for(int i = 0; i < n; i++)
-            if(!pa[act[i]] && !in_deg[act[i]])
-                return false;
-
-    for(int i = 0; i < n; i++)
-    {
-        // Rule 7a: fan-in. Feed is capped harder, because what arrives there
-        // is gain; mod only gets busier.
-        if(in_deg[act[i]] > limits.fan_in)
-            return false;
-        // Rule 7b: the flood budget, feed only
-        if(cable_mode == 1 && tiles
-           && FL[TileF(tiles[act[i]])] * solve_fm + in_amt[act[i]]
-                  > limits.Iflood)
-            return false;
-    }
-
-    // Rule 6b: one structure, not two disjoint pairs. Edges count either way
-    // round for this, so a chain satisfies it without a cycle.
-    if(limits.connected_on && n >= 2)
-    {
-        bool seen[kVoices] = {};
-        int  stack[kVoices], ns = 0;
-        stack[ns++]     = act[0];
-        seen[act[0]]    = true;
-        int reached     = 1;
-        while(ns)
-        {
-            const int cur = stack[--ns];
-            for(int i = 0; i < n; i++)
-            {
-                const int w = act[i];
-                if(seen[w])
-                    continue;
-                const bool linked
-                    = (pa[cur] && OptTarget(pa[cur]) == w)
-                      || (pa[w] && OptTarget(pa[w]) == cur);
-                if(linked)
-                {
-                    seen[w]     = true;
-                    stack[ns++] = w;
-                    reached++;
-                }
-            }
-        }
-        if(reached < n)
-            return false;
-    }
-
-    // Rule 4's cycle half: feed only
-    if(!limits.cycle_on || cable_mode != 1)
-        return true;
-    for(int i = 0; i < n; i++)
-    {
-        int cur = act[i];
-        for(int s = 0; s < kVoices; s++)
-        {
-            const int o = pa[cur];
-            if(!o)
-                break;
-            const int t = OptTarget(o);
-            if(!InList(act, n, t))
-                break;
-            cur = t;
-            if(cur == act[i])
-                return false;
-        }
-    }
-    return true;
-}
 
 // --------------------------------------------------------- arc consistency
 
@@ -531,77 +396,6 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
     return 0;
 }
 
-// The cable layer: pin the new cable, then take the smallest change to the
-// others' cables that still satisfies rule 4.
-//
-// This was exhaustive, and it was only ever tractable because cables could
-// not cross groups: three voices to a group capped it at a few dozen
-// leaves. One cluster of seven removes that cap -- 19 options over 6 other
-// voices is 47 million leaves, each one a PatchesOK, which hangs outright.
-// So it is a widening search instead: leave everything alone if that is
-// already legal, then try moving one voice, then re-roll the lot a few
-// times. Same preference for the smallest change, bounded work.
-bool RepairPatches(const int* act, int n, int fixed_v, int fixed_opt,
-                   const int* tiles, int8_t* out)
-{
-    int8_t trial[kVoices];
-    memcpy(trial, patch, sizeof(trial));
-    if(fixed_v >= 0)
-        trial[fixed_v] = (int8_t)fixed_opt;
-    rp_tiles = tiles;
-
-    int others[kVoices], n_others = 0;
-    for(int i = 0; i < n; i++)
-        if(act[i] != fixed_v)
-            others[n_others++] = act[i];
-
-    // Nothing to do, which is the usual case
-    if(PatchesOK(trial, act, n, tiles))
-    {
-        memcpy(out, trial, sizeof(trial));
-        return true;
-    }
-
-    // One voice moved, cheapest first by construction
-    for(int j = 0; j < n_others; j++)
-    {
-        const int   v    = others[j];
-        const int8_t was = trial[v];
-        for(int o = 0; o < kOpts; o++)
-        {
-            if(o && OptTarget(o) == v)
-                continue;
-            trial[v] = (int8_t)o;
-            if(PatchesOK(trial, act, n, tiles))
-            {
-                memcpy(out, trial, sizeof(trial));
-                return true;
-            }
-        }
-        trial[v] = was;
-    }
-
-    // Then whole configurations at random, which is what the exhaustive
-    // walk would have found eventually
-    for(int t = 0; t < 64; t++)
-    {
-        for(int j = 0; j < n_others; j++)
-        {
-            const int v = others[j];
-            int       o = RandInt(kOpts);
-            if(o && OptTarget(o) == v)
-                o = 0;
-            trial[v] = (int8_t)o;
-        }
-        if(PatchesOK(trial, act, n, tiles))
-        {
-            memcpy(out, trial, sizeof(trial));
-            return true;
-        }
-    }
-    return false;
-}
-
 bool RepairMod(const int* act, int n, int fixed_v, int fixed_opt,
                const int* tl, int8_t* out)
 {
@@ -635,12 +429,6 @@ int ApplyWave(const Change* ch, const int* order, int n, int kind,
             tile[v] = (int16_t)ch[v].tile;
             e.tile  = ch[v].tile;
             any     = true;
-        }
-        if(ch[v].patch >= 0 && ch[v].patch != patch[v])
-        {
-            patch[v] = (int8_t)ch[v].patch;
-            e.patch  = ch[v].patch;
-            any      = true;
         }
         if(ch[v].skew >= 0 && ch[v].skew != (int)skew[v])
         {
@@ -680,34 +468,6 @@ int RandomTile()
     return list[RandInt(n)];
 }
 
-int RandomPatchOpt(int v, const int* act, int n)
-{
-    // With cables off the only legal option is none; with them on, asking for
-    // one most of the time is what lets rule 6 be satisfied without the search
-    // having to climb out of a hole
-    if(!cable_mode)
-        return 0;
-    if(Rand() < 0.2f)
-        return 0;
-    int others[kVoices], no = 0, live[kVoices], nl = 0;
-    for(int o = 0; o < kVoices; o++)
-        if(o != v && GroupOf(o) == GroupOf(v))
-        {
-            others[no++] = o;
-            if(InList(act, n, o))
-                live[nl++] = o;
-        }
-    const bool use_live = nl && Rand() < 0.65f;
-    const int  pick     = use_live ? live[RandInt(nl)] : others[RandInt(no)];
-    // The amount used to be a bare dice roll -- the one thing about a cable
-    // nothing on the panel could reach. The knob asks, the jitter keeps the
-    // ensemble from landing on one amount, rule 5 still gets to refuse.
-    const float want = knob.cable * 2.0f;
-    int         amt  = (int)(want * (0.4f + 0.8f * Rand()) + 0.5f);
-    amt              = amt < 0 ? 0 : (amt > 2 ? 2 : amt);
-    return 1 + pick * 3 + amt;
-}
-
 int RandomModOpt()
 {
     // The knob asks for depth; rule 5 decides how much of it is allowed. The
@@ -732,8 +492,6 @@ bool          TookBreak()
     return was;
 }
 void          SetFrozen(bool on) { frozen = on; }
-void          SetCableMode(int m) { cable_mode = m; }
-int           CableMode() { return cable_mode; }
 bool          Frozen() { return frozen; }
 const Limits& Lim() { return limits; }
 
@@ -763,7 +521,6 @@ float DrvMul() { return Lerp(0.4f, 1.6f, knob.drive); }
 // Raised from 1.5 when the mod rule went: nothing caps depth now, so the
 // knob is the only ceiling
 float ModMul() { return Lerp(0.0f, 4.0f, knob.mod); }
-float CableMul() { return Clamp(knob.cable, 0.0f, 1.0f); }
 float LoopCut() { return 300.0f * powf(24.0f, knob.filter); }
 float VoiceCutMul() { return Lerp(1.5f, 14.0f, knob.filter); }
 // Unrest used to ride on strictness, which made strict-but-restless and
@@ -786,7 +543,7 @@ float UnrestRate() { return Lerp(0.0f, 0.25f, knob.unrest); }
 const char* BreakName(BreakType t)
 {
     static const char* n[kBreakTypes]
-        = {"echo", "swell", "fuzz", "flood", "cable"};
+        = {"echo", "swell", "fuzz"};
     return (int)t < kBreakTypes ? n[t] : "?";
 }
 
@@ -804,14 +561,8 @@ void RebuildRules()
     // to violate once the pair rule went.
     limits.Rself    = s > 0.6f ? 0.7f : 9.0f;
     limits.ratio_on = s > 0.3f;
-    limits.cycle_on = s > 0.35f;
     limits.Lpeak    = s > 0.6f ? 0.98f : (s > 0.3f ? 1.2f : 9.0f);
     limits.gap      = Lerp(0.004f, 0.02f, s);
-    // The cable rules. Feed is held tighter than mod throughout: what arrives
-    // down a feed cable is gain, what arrives down a mod cable is movement.
-    limits.Iflood       = Lerp(3.2f, 1.4f, s);
-    limits.fan_in       = cable_mode == 1 ? (s > 0.6f ? 1 : 2) : 3;
-    limits.connected_on = s > 0.7f;
 
     tables_dirty = true;
 }
@@ -872,10 +623,9 @@ void Init(uint32_t seed)
     for(int v = 0; v < kVoices; v++)
     {
         tile[v] = shown_tile[v] = kDefaultTile;
-        patch[v] = shown_patch[v] = 0;
         mod_opt[v] = shown_mod[v] = 0;
         skew[v] = shown_skew[v] = 0;
-        seq_tile[v] = seq_patch[v] = seq_mod[v] = seq_skew[v] = 0;
+        seq_tile[v] = seq_mod[v] = seq_skew[v] = 0;
         sounding[v]                                           = false;
         started_at[v]                                         = 0;
         flash[v]                                              = 0;
@@ -914,11 +664,9 @@ float StartedAt(int v) { return started_at[v]; }
 
 int EventsDropped() { return n_dropped; }
 int Tile(int v) { return tile[v]; }
-int Patch(int v) { return patch[v]; }
 int Mod(int v) { return mod_opt[v]; }
 int Skew(int v) { return skew[v]; }
 int ShownTile(int v) { return shown_tile[v]; }
-int ShownPatch(int v) { return shown_patch[v]; }
 int ShownMod(int v) { return shown_mod[v]; }
 int ShownSkew(int v) { return shown_skew[v]; }
 
@@ -961,9 +709,7 @@ void Pass(int v, float now)
         skipped = Repair(act, n, order, v, RandomTile(), line);
     const bool have_line = skipped >= 0;
 
-    // Both the patches and the mod are judged against the tiles the line
-    // layer just chose: the flood budget weighs feedback against what is fed
-    // in, so it cannot be decided before the feedback is
+    // The mod is judged against the tiles the line layer just chose
     int ft[kVoices];
     for(int i = 0; i < kVoices; i++)
         ft[i] = tile[i];
@@ -971,15 +717,6 @@ void Pass(int v, float now)
         for(int i = 0; i < no; i++)
             if(line[order[i]] >= 0)   // -1 means that voice keeps its tile
                 ft[order[i]] = line[order[i]];
-
-    int8_t pat[kVoices];
-    bool   have_pat = false;
-    for(int k = 0; k < 10 && !have_pat; k++)
-        have_pat
-            = RepairPatches(act, n, v, RandomPatchOpt(v, act, n), ft, pat);
-    if(!have_pat)
-        have_pat = RepairPatches(act, n, v, 0, ft, pat);
-
 
     int8_t md[kVoices];
     bool   have_mod = false;
@@ -996,8 +733,6 @@ void Pass(int v, float now)
         const int m = order[i];
         if(have_line)
             ch[m].tile = line[m];
-        if(have_pat)
-            ch[m].patch = pat[m];
         if(have_mod)
             ch[m].mod = md[m];
     }
@@ -1049,7 +784,7 @@ void Heal(int g, float now)
     // Nothing is pinned here, so there is no alternative roll to try: a
     // partial settle is taken as it comes.
     int        line[kVoices];
-    int8_t     pat[kVoices], md[kVoices];
+    int8_t     md[kVoices];
     const bool have_line = Repair(act, n, order, -1, -1, line) >= 0;
 
     int ft[kVoices];
@@ -1060,7 +795,6 @@ void Heal(int g, float now)
             if(line[order[i]] >= 0)   // -1 means that voice keeps its tile
                 ft[order[i]] = line[order[i]];
 
-    const bool have_pat = RepairPatches(act, n, -1, 0, ft, pat);
     const bool have_mod = RepairMod(act, n, -1, 0, ft, md);
 
     Change ch[kVoices];
@@ -1073,9 +807,8 @@ void Heal(int g, float now)
         // -1 leaves the tile alone, which is also what a total failure now
         // does: painting every voice with the default tile was the collapse
         // this repair exists to avoid.
-        ch[m].tile  = have_line ? line[m] : -1;
-        ch[m].patch = have_pat ? pat[m] : 0;
-        ch[m].mod   = have_mod ? md[m] : 0;
+        ch[m].tile = have_line ? line[m] : -1;
+        ch[m].mod  = have_mod ? md[m] : 0;
     }
     ApplyWave(ch, order, n, 1, 0.0f, now);
 }
@@ -1095,23 +828,8 @@ void BreakRule(int type, int g, float offset, float now, int prefer)
     const int n = Active(act, g);
     if(!n)
         return;
-    // Not every break is available: the cable ones need two voices to cross
-    // and a mode to cross in, and flooding is a feed-only idea.
-    int avail[kBreakTypes], na = 0;
-    for(int t = 0; t < kBreakTypes; t++)
-    {
-        if((t == kCable || t == kFlood) && (n < 2 || !cable_mode))
-            continue;
-        if(t == kFlood && cable_mode != 1)
-            continue;
-        avail[na++] = t;
-    }
-    bool ok = false;
-    for(int i = 0; i < na; i++)
-        if(avail[i] == type)
-            ok = true;
-    if(!ok)
-        type = na ? avail[RandInt(na)] : kSwell;
+    if(type < 0 || type >= kBreakTypes)
+        type = RandInt(kBreakTypes);
 
     int order[kVoices];
     memcpy(order, act, sizeof(int) * n);
@@ -1175,19 +893,11 @@ void BreakRule(int type, int g, float offset, float now, int prefer)
                 ch[b].tile
                     = MkTile(TileD(tb), 3, TileR(tb) < 1 ? TileR(tb) : 1);
             break;
-        case kFuzz:   // drive overload
+        default:   // kFuzz, drive overload
             ch[a].tile = MkTile(TileD(ta), TileF(ta) < 2 ? TileF(ta) : 2, 3);
             if(b >= 0)
                 ch[b].tile
                     = MkTile(TileD(tb), TileF(tb) < 2 ? TileF(tb) : 2, 3);
-            break;
-        case kFlood:   // fed hard while already ringing, feed only
-            ch[b].patch = 1 + a * 3 + 2;
-            ch[a].tile  = MkTile(TileD(ta), 4, TileR(ta) < 1 ? TileR(ta) : 1);
-            break;
-        default:   // two voices patched into each other, hardest
-            ch[a].patch = 1 + b * 3 + 2;
-            ch[b].patch = 1 + a * 3 + 2;
             break;
     }
     // A break that lands on the tile the voice already holds changes
@@ -1249,11 +959,6 @@ void Tick(float now)
         {
             seq_tile[e.v]   = e.seq;
             shown_tile[e.v] = (int16_t)e.ch.tile;
-        }
-        if(e.ch.patch >= 0 && e.seq >= seq_patch[e.v])
-        {
-            seq_patch[e.v]   = e.seq;
-            shown_patch[e.v] = (int8_t)e.ch.patch;
         }
         if(e.ch.skew >= 0 && e.seq >= seq_skew[e.v])
         {
@@ -1324,9 +1029,6 @@ int Diagnose(Violation* out, int max, int group)
     const int   n   = Active(act, group);
     int         cnt = 0;
     const float fm = ChargedFb(group), dm = DrvMul(), base = DelayBase();
-    float       in_amt[kVoices] = {};
-    int         in_deg[kVoices] = {};
-    InAmounts(shown_patch, act, n, in_amt, in_deg);
 
     for(int i = 0; i < n && cnt < max; i++)
     {
@@ -1335,11 +1037,6 @@ int Diagnose(Violation* out, int max, int group)
             out[cnt++] = Violation{kSwell, {a, -1}};
         if(RL[TileR(t)] * dm > limits.Rself && cnt < max)
             out[cnt++] = Violation{kFuzz, {a, -1}};
-        // Rule 7: fed and ringing at once, which only feed can be
-        if(cable_mode == 1 && cnt < max
-           && (FL[TileF(t)] * fm + in_amt[a] > limits.Iflood
-               || in_deg[a] > limits.fan_in))
-            out[cnt++] = Violation{kFlood, {a, -1}};
     }
     // The ensemble budgets. Blamed on the two biggest spenders, so a heal
     // has somewhere obvious to take the energy from.
@@ -1380,41 +1077,6 @@ int Diagnose(Violation* out, int max, int group)
             if(limits.ratio_on && cnt < max && dd >= 1e-6f
                && dd * base < limits.gap)
                 out[cnt++] = Violation{kEcho, {a, b, -1}};
-        }
-    if(limits.cycle_on)
-        for(int i = 0; i < n && cnt < max; i++)
-        {
-            const int v = act[i];
-            int       path[kVoices + 1], np = 0, lo = v;
-            path[np++] = v;
-            int cur    = v;
-            for(int s = 0; s < kVoices; s++)
-            {
-                const int o = shown_patch[cur];
-                if(!o)
-                    break;
-                const int t = OptTarget(o);
-                if(!InList(act, n, t))
-                    break;
-                if(t == v)
-                {
-                    // Reported once per cycle, by its lowest-numbered voice
-                    if(v == lo)
-                    {
-                        Violation x;
-                        x.type = kCable;
-                        for(int p = 0; p < np; p++)
-                            x.v[p] = path[p];
-                        x.v[np]    = -1;
-                        out[cnt++] = x;
-                    }
-                    break;
-                }
-                path[np++] = t;
-                if(t < lo)
-                    lo = t;
-                cur = t;
-            }
         }
     return cnt;
 }

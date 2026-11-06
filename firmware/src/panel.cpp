@@ -127,21 +127,16 @@ void Poll()
 {
     for(int i = 0; i < kAnalog; i++)
         analog[i].Process();
-    // S30 Mod, S31 Feedback, S32 Delay, S33 Distortion, S34 Filter.
-    // S35 Cables; the S36 fader is unassigned; S37 is Hold.
+    // S30 Mod, S31 Feedback, S32 Delay, S33 Distortion, S34 Filter,
+    // S35 Shift. The S36 fader is unassigned; S37 is Hold.
     static const int kKnobOf[kAnalog] = {4, 1, 0, 2, 3, 8, -1, 7};
     for(int i = 0; i < kAnalog; i++)
         synth::SetKnob(kKnobOf[i], analog[i].Value());
-
-    // S07/S08 picks what a cable carries. Centre is none at all, up is
-    // cross-modulation, down is cross-feed; the two live positions also turn
-    // on rule 6, which leaves no sounding voice out of the patching. It sits
-    // next to S35, which sets how hard the cable is driven, so the switch
-    // and its depth are one gesture apart.
-    const int b = switch_a.Read();
-    synth::SetCableMode(b == Switch3::POS_UP     ? voices::kCableMod
-                        : b == Switch3::POS_DOWN ? voices::kCableFeed
-                                                 : voices::kCableOff);
+    // S07/S08 up freezes the solver, down latches the pads
+    const int sa = switch_a.Read();
+    synth::Freeze(sa == Switch3::POS_UP);
+    synth::Latch(sa == Switch3::POS_DOWN);
+    voices::SetCommon(switch_b.Read() == Switch3::POS_UP);
 
     const uint16_t changed = (uint16_t)(pad_state ^ last_pads);
     for(int i = 0; i < kPads; i++)

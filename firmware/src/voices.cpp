@@ -17,6 +17,7 @@ namespace
 {
 constexpr int kPartials = 8;
 
+
 // SPIKE: the voice worlds.
 //
 // A world is its material and its body together, so a model sets both: what
@@ -67,10 +68,6 @@ constexpr Model kModel[kModels] = {
 int cur_model = 0;
 inline const Model& M() { return kModel[cur_model]; }
 
-int   cable_mode = kCableOff;
-// Own matrix, not cab: cab is rendered per cable mode, a bridge must always feed
-struct Bridge { int src; int dst; float amt; } br[2] = {{-1, 0, 0}, {-1, 0, 0}};
-float bri[wfc::kVoices][wfc::kVoices], bri_t[wfc::kVoices][wfc::kVoices];
 
 float sr        = 48000.0f;
 float inv_sr    = 1.0f / 48000.0f;
@@ -258,7 +255,6 @@ struct Voice
     float lcut, lcut_t;
     float pre, pre_t;
     float wet, wet_t;
-    float cab[wfc::kVoices], cab_t[wfc::kVoices];
 
     // The mod, and the three depths it adds through
     float    mspeed, mspeed_t;   // the response speed WFC chose, in Hz
@@ -314,11 +310,25 @@ struct Voice
 Voice     v[wfc::kVoices];
 float SLOW_BSS delay_mem[wfc::kVoices][kDelayMax];
 
+// THE COMMON LINE, on S09/S10 up. One delay that every voice feeds and every
+// voice reads, so a single pad is answered by all seven lines and a voice
+// nobody is touching still rings with what the others are doing. Not the
+// cables again: there is nothing routed and nothing for the solver to
+// arbitrate -- seven in, one line, seven out.
+constexpr float kCommDly = 0.41f;   // a multiple of no voice's period, on purpose
+constexpr float kCommFb  = 0.55f;   // what the common line gives back to itself
+constexpr float kCommRet = 0.25f;   // and how much of it lands in each voice
+bool  comm_on = false;
+float comm_g  = 0.0f;   // ramped: a step to full is a click in all seven at once
+float SLOW_BSS comm_mem[kDelayMax];
+int   comm_wr   = 0;
+float comm_prev = 0.0f, comm_lp = 0.0f, comm_lp_c = 0.0f;
+
 // The coefficients, rebuilt whenever dt changes (which is never, in practice)
 struct
 {
     float dt;
-    float vca, vcut, fb, lcut, pre, wet, cab, mod_speed, mod_depth, dly;
+    float vca, vcut, fb, lcut, pre, wet, mod_speed, mod_depth, dly;
     float fresh;
 } co = {};
 
@@ -332,7 +342,6 @@ void Recoeff(float dt, float glide)
     co.lcut      = Coeff(0.1f, dt);
     co.pre       = Coeff(0.1f, dt);
     co.wet       = Coeff(0.1f, dt);
-    co.cab       = Coeff(0.1f, dt);
     co.mod_speed  = Coeff(0.3f, dt);
     co.mod_depth = Coeff(0.08f, dt);
     co.dly       = Coeff(glide, dt);
@@ -404,14 +413,15 @@ void Init(float sample_rate, int block_size)
     for(bool& h : pad_held)
         h = true;
     loop_hp_c = 1.0f - expf(-2.0f * 3.14159265f * kLoopHpHz * inv_sr);
+    comm_lp_c = 1.0f - expf(-2.0f * 3.14159265f * 2000.0f * inv_sr);
+    memset(comm_mem, 0, sizeof(comm_mem));
+    comm_wr   = 0;
+    comm_prev = comm_lp = comm_g = 0.0f;
 
     for(int i = 0; i <= kSinLen; i++)
         sin_tab[i] = sinf(2.0f * 3.14159265358979f * (float)i / (float)kSinLen);
 
     rng_state = 0x9e3779b9u;
-    memset(bri, 0, sizeof(bri));
-    for(int i = 0; i < 2; i++)
-        SetBridge(i, -1, 0, 0.0f);
     for(int i = 0; i < wfc::kVoices; i++)
     {
         Voice& vo = v[i];
@@ -480,48 +490,13 @@ void SetModel(int m)
     for(int i = 0; i < wfc::kVoices; i++)
         SetPartialFreqs(v[i], true);
 }
+void SetCommon(bool on) { comm_on = on; }
+bool Common() { return comm_on; }
+
 int         Model_() { return cur_model; }
 const char* ModelName(int m)
 {
     return m >= 0 && m < kModels ? kModel[m].name : "?";
-}
-
-void SetCableMode(int m)
-{
-    cable_mode = m >= 0 && m < kCableCount ? m : kCableOff;
-    wfc::SetCableMode(cable_mode);
-}
-int  CableMode_() { return cable_mode; }
-const char* CableName(int m)
-{
-    static const char* n[kCableCount] = {"off", "feed", "mod"};
-    return m >= 0 && m < kCableCount ? n[m] : "?";
-}
-
-static bool Ok(int a, int b)
-{
-    return a >= 0 && a < wfc::kVoices && b >= 0 && b < wfc::kVoices;
-}
-
-void SetBridge(int i, int src, int dst, float amt)
-{
-    if(i < 0 || i > 1)
-        return;
-    br[i] = {src, dst, amt};
-    memset(bri_t, 0, sizeof(bri_t));
-    for(const Bridge& b : br)
-        if(Ok(b.src, b.dst) && b.src != b.dst)
-            bri_t[b.src][b.dst] += b.amt;
-}
-
-float CableCmd(int src, int dst)
-{
-    return Ok(src, dst) ? v[src].cab_t[dst] + bri_t[src][dst] : 0.0f;
-}
-
-float CableEff(int src, int dst)
-{
-    return Ok(src, dst) ? v[src].cab[dst] + bri[src][dst] : 0.0f;
 }
 
 void SetPitch(int i, float hz, float ref, bool snap)
@@ -590,7 +565,6 @@ void Control(float now, float dt)
     const float fbm   = wfc::FbMul();
     const float drvm  = wfc::DrvMul();
     const float modm  = wfc::ModMul();
-    const float cabm  = wfc::CableMul();
     const float lcut  = wfc::LoopCut();
     const float vcm   = wfc::VoiceCutMul();
     const float mspeed0 = wfc::ModSpeed0();
@@ -654,7 +628,6 @@ void Control(float now, float dt)
 
         // What the wave has actually delivered to this voice
         const int   tile = wfc::ShownTile(i);
-        const int   po   = wfc::ShownPatch(i);
         const int   lo   = wfc::ShownMod(i);
         const bool  skew = wfc::ShownSkew(i) != 0;
         const float F = wfc::FL[wfc::TileF(tile)];
@@ -689,9 +662,16 @@ void Control(float now, float dt)
         // A broken delay is no longer in tune with the voice's pitch; an
         // unbroken one is snapped to a whole number of its periods, which is
         // what makes the echoes reinforce instead of smear
+        // S35 DETUNE slides it back off, by up to half a period: the comb's
+        // teeth walk off the voice's harmonics and onto the gaps between
+        // them, so the loop rings a hollow ghost the pad is not playing.
+        // Half a period is the whole of the range -- a full one is the snap
+        // again, one echo further back.
         const float t0 = base * D * M().dly_mul * (skew ? wfc::kSkew : 1.0f);
-        float       d  = skew ? t0
-                              : floorf(t0 * vo.hz + 0.5f) / vo.hz;
+        float       d
+            = skew ? t0
+                   : (floorf(t0 * vo.hz + 0.5f) + 0.5f * wfc::K().detune)
+                         / vo.hz;
         if(!skew && d * vo.hz < 1.0f)
             d = 1.0f / vo.hz;
         const float dly = Clamp(d, 0.02f, dly_max < 1.9f ? dly_max : 1.9f);
@@ -732,14 +712,6 @@ void Control(float now, float dt)
         vo.depth_now    = dpe;
         vo.m_pre_t      = pre * 0.35f * dpe;
 
-        // The cable, which is live only while its SOURCE voice sounds
-        const int tgt = wfc::OptTarget(po);
-        for(int j = 0; j < wfc::kVoices; j++)
-            vo.cab_t[j] = (on && j == tgt)
-                              ? wfc::AMT[wfc::OptAmt(po)] * cabm * sqrtf(pre)
-                                    * 1.3f
-                              : 0.0f;
-
         // A break is an event, a repair is a recovery, so they do not travel
         // the same way. Gain and drive snap to the broken value and heal back
         // over the ordinary glide; the delay instead CRAWLS to it, which drags
@@ -765,11 +737,6 @@ void Control(float now, float dt)
         Approach(vo.m_dly, vo.m_dly_t, co.mod_depth);
         Approach(vo.m_fb, vo.m_fb_t, co.mod_depth);
         Approach(vo.m_pre, vo.m_pre_t, co.mod_depth);
-        for(int j = 0; j < wfc::kVoices; j++)
-        {
-            Approach(vo.cab[j], vo.cab_t[j], co.cab);
-            Approach(bri[i][j], bri_t[i][j], co.cab);
-        }
 
         // THE MODULATOR. The voice follows its own loop: rising or falling,
         // not loud or quiet, because the difference of two envelopes is
@@ -780,7 +747,6 @@ void Control(float now, float dt)
         // voice twitches, another heaves, and the rule layer keeps its shape.
         //
         // ponytail: block-rate, ~1 ms steps. Fine for an envelope follower.
-        // The cross-MODULATION cables are the per-sample path; see Process().
         const float lvl = vo.lvl_n ? vo.lvl_sum / (float)vo.lvl_n : 0.0f;
         vo.out_lvl      = lvl;
         vo.lvl_sum      = 0.0f;
@@ -888,9 +854,31 @@ void AdvanceTaps(float dt)
     }
 }
 
+// One interpolated read, `d` samples behind the write head. Wrapped by
+// subtraction, not by %: kDelayMax is not a power of two, so each % is a
+// real integer divide and there are five per voice per sample. The tap is
+// never more than one buffer behind the write head, so one test is enough.
+inline float Rd(const float* line, int wr, float d)
+{
+    const float dc = Clamp(d, 2.0f, (float)(kDelayMax - 2));
+    const int   di = (int)dc;
+    const float fr = dc - (float)di;
+    int         i0 = wr - di;
+    if(i0 < 0)
+        i0 += kDelayMax;
+    int i1 = i0 - 1;
+    if(i1 < 0)
+        i1 += kDelayMax;
+    return line[i0] + (line[i1] - line[i0]) * fr;
+}
+
 void Process(float* out_l, float* out_r, int n, const float* in,
              float in_mix)
 {
+    Approach(comm_g, comm_on ? 1.0f : 0.0f, Coeff(0.05f, (float)n * inv_sr));
+    const float cret = kCommRet * comm_g;
+    const bool  cact = comm_g > 1.0e-4f;
+
     AdvanceTaps((float)n * inv_sr);
     // Resolved once a block: the mod and every smoothed value hold still
     // across it, which is what makes the per-sample loop cheap
@@ -947,22 +935,15 @@ void Process(float* out_l, float* out_r, int n, const float* in,
         vo.eff_pre = preg[i];
     }
 
-    // Nothing patched is the normal case, and the scan below is seven loads
-    // per voice per sample -- 42 of them a sample that add up to nothing.
-    bool crossing = false;
-    for(int i = 0; i < wfc::kVoices && !crossing; i++)
-        for(int j = 0; j < wfc::kVoices; j++)
-            if(bri[i][j] != 0.0f || v[i].cab[j] != 0.0f)
-            {
-                crossing = true;
-                break;
-            }
-
     for(int s = 0; s < n; s++)
     {
         float l = 0.0f, r = 0.0f;
-        // Captured before anything is written, so every cable and feedback
-        // tap in this sample reads the same previous-sample output
+        // What the common line put out last sample, and what the voices will
+        // put into it this one
+        const float cpv  = comm_prev;
+        float       csum = 0.0f;
+        // Captured before anything is written, so every feedback tap in this
+        // sample reads the same previous-sample output
         float prev[wfc::kVoices];
         for(int i = 0; i < wfc::kVoices; i++)
             prev[i] = v[i].post_prev;
@@ -995,55 +976,14 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             // The voice itself, before its line
             const float dry = vo.vlp.Process(src) * vo.vca;
 
-            // What the cables pointed at this voice are carrying. Feed adds
-            // their audio to the line; Mod spends it on the tap position and
-            // the feedback instead. Mod has to be per sample because the
-            // modulator IS audio -- there is nothing slow about it.
-            float fed = 0.0f, dmod = 0.0f, fmod = 0.0f;
-            for(int j = 0; j < (crossing ? wfc::kVoices : 0); j++)
-            {
-                if(j == i)
-                    continue;
-                fed += prev[j] * bri[j][i];
-                if(v[j].cab[i] == 0.0f)
-                    continue;
-                const float c = prev[j] * v[j].cab[i];
-                if(cable_mode == kCableMod)
-                {
-                    // A FRACTION of the tap, not a fixed number of samples:
-                    // 0.004 s of a 230 ms delay is 0.17%, about three cents,
-                    // which is why this mode was inaudible. A quarter of the
-                    // tap is a real bend, and the Clamp below keeps it legal.
-                    dmod += c * dsamp[i] * 0.3f;
-                    fmod += c * 0.8f;
-                }
-                else
-                    fed += c;
-            }
-
             // What goes into the line: the voice, its own feedback, and
-            // whatever the cables fed it
-            const float in = dry + Clamp(fbg[i] + fmod, 0.0f, 1.3f) * prev[i]
-                             + fed;
+            // whatever the whole instrument left in the common line
+            const float in = dry + fbg[i] * prev[i] + cret * cpv;
 
             // Write, then read `dsamp` samples back, interpolated because the
-            // mod and the repair glide both move the tap
+            // repair glide moves the tap within the block
             vo.line[vo.wr] = in;
-            const float ds  = Clamp(dsamp[i] + dmod, 2.0f,
-                                    (float)(kDelayMax - 2));
-            const int   di  = (int)ds;
-            const float fr  = ds - (float)di;
-            // Wrapped by subtraction, not by %: kDelayMax is not a power
-            // of two, so each % is a real integer divide, and there are
-            // five per voice per sample. The tap is never more than one
-            // buffer behind the write head, so one test is enough.
-            int         i0  = vo.wr - di;
-            if(i0 < 0)
-                i0 += kDelayMax;
-            int         i1  = i0 - 1;
-            if(i1 < 0)
-                i1 += kDelayMax;
-            const float out = vo.line[i0] + (vo.line[i1] - vo.line[i0]) * fr;
+            const float out = Rd(vo.line, vo.wr, dsamp[i]);
             float outm = out, o2;
             if(xf[i] > 0.0f)
             {
@@ -1055,40 +995,9 @@ void Process(float* out_l, float* out_r, int n, const float* in,
                 // shut the whole time: measured at the user's panel, L/R
                 // correlation goes -0.01 still to 0.65 turning. Four reads
                 // once saturated the callback; at 32 kHz it does not.
-                const float ns = Clamp(dsampn[i] + dmod, 2.0f,
-                                       (float)(kDelayMax - 2));
-                const int   ni = (int)ns;
-                const float nf = ns - (float)ni;
-                int         n0 = vo.wr - ni;
-                if(n0 < 0)
-                    n0 += kDelayMax;
-                int         n1 = n0 - 1;
-                if(n1 < 0)
-                    n1 += kDelayMax;
-                const float nv = vo.line[n0]
-                                 + (vo.line[n1] - vo.line[n0]) * nf;
-                const float ws = Clamp(ns * 1.013f, 2.0f,
-                                       (float)(kDelayMax - 2));
-                const int   wi = (int)ws;
-                const float wf = ws - (float)wi;
-                int         w0 = vo.wr - wi;
-                if(w0 < 0)
-                    w0 += kDelayMax;
-                int         w1 = w0 - 1;
-                if(w1 < 0)
-                    w1 += kDelayMax;
-                const float wv = vo.line[w0]
-                                 + (vo.line[w1] - vo.line[w0]) * wf;
-                const int   oj = (int)dsamp2[i];
-                const float of = dsamp2[i] - (float)oj;
-                int         q0 = vo.wr - oj;
-                if(q0 < 0)
-                    q0 += kDelayMax;
-                int         q1 = q0 - 1;
-                if(q1 < 0)
-                    q1 += kDelayMax;
-                const float ov = vo.line[q0]
-                                 + (vo.line[q1] - vo.line[q0]) * of;
+                const float nv = Rd(vo.line, vo.wr, dsampn[i]);
+                const float wv = Rd(vo.line, vo.wr, dsampn[i] * 1.013f);
+                const float ov = Rd(vo.line, vo.wr, dsamp2[i]);
                 // Equal power by square root, not by sin/cos: the two taps
                 // read uncorrelated parts of the line so a linear fade dips
                 // in the middle, but VSQRT is one instruction where sinf and
@@ -1102,15 +1011,7 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             }
             else
             {
-                const int   dj = (int)dsamp2[i];
-                const float fj = dsamp2[i] - (float)dj;
-                int         j0 = vo.wr - dj;
-                if(j0 < 0)
-                    j0 += kDelayMax;
-                int         j1 = j0 - 1;
-                if(j1 < 0)
-                    j1 += kDelayMax;
-                o2 = vo.line[j0] + (vo.line[j1] - vo.line[j0]) * fj;
+                o2 = Rd(vo.line, vo.wr, dsamp2[i]);
             }
 
             vo.wr           = vo.wr + 1 >= kDelayMax ? 0 : vo.wr + 1;
@@ -1122,6 +1023,7 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             const float sh  = Shape(f * preg[i]);
             const float pst = sh * postg[i];
             vo.post_prev    = pst;
+            csum += pst;
             vo.lvl_sum += pst < 0.0f ? -pst : pst;
             vo.lvl_n++;
 
@@ -1152,6 +1054,22 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             dsamp2[i] += dsamp2i[i];
             dsampn[i] += dsampni[i];
         }
+        if(cact)
+        {
+            // Write then read, exactly as a voice's own line does
+            comm_mem[comm_wr] = csum * (1.0f / (float)wfc::kVoices)
+                                + kCommFb * comm_prev;
+            const float co = Rd(comm_mem, comm_wr, kCommDly * sr);
+            comm_wr        = comm_wr + 1 >= kDelayMax ? 0 : comm_wr + 1;
+            comm_lp += (co - comm_lp) * comm_lp_c;
+            // Soft clip, not a limiter: the path out through the voices and
+            // back can pass unity at high feedback, and this bounds it the
+            // same way each voice's own drive bounds its own loop.
+            comm_prev = Shape(comm_lp);
+        }
+        else
+            comm_prev = comm_lp = 0.0f;
+
         out_l[s] += l;
         out_r[s] += r;
     }

@@ -8,8 +8,9 @@
 //         A playing pad also reports contact force, and leaning on one
 //         breaks its group -- see synth::SetPressure
 // Knobs:  S30..S35 on ADC 0..5, faders S36/S37 on ADC 6,7
-// Switch: S07/S08 cross-mod/none/cross-feed; S09/S10 is unassigned
-// Spare:  P01, the S36 fader and the S09/S10 switch
+// Switch: S07/S08 up freezes the solver, down latches the pads
+//         S09/S10 up puts the common line between the voices
+// Spare:  P01, the S36 fader
 //
 // The engine is not reentrant and a solve is most of an audio block, so the
 // whole control side -- this and synth::Control -- runs in the main loop.

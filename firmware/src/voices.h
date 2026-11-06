@@ -2,7 +2,7 @@
 //
 // Four voices. Each is 8 breathing sine partials into its own delay line,
 // whose feedback path runs through a distortion, with a per-voice mod on that
-// line's delay time, feedback and drive, and a patch cable that can feed its
+// line's delay time, feedback and drive, and
 // loop output into another voice's loop input.
 //
 // Everything WFC decided is read from the SHOWN state (wfc::Shown*), never
@@ -30,33 +30,17 @@ namespace voices
 // clamped to 1.9 s, so there is always room for the interpolator's next tap.
 constexpr int kDelayMax = 96000;
 
-// What a cable carries. Off is no cable at all; Feed is audio into the
-// target's loop input; Mod is the source's audio modulating the target's
-// delay time and feedback, per sample, which is why it is a different animal.
-enum CableMode
-{
-    kCableOff = 0,
-    kCableFeed,
-    kCableMod,
-    kCableCount
-};
-void SetCableMode(int m);
-
 // SPIKE: three voice baselines to choose between by ear. GUI only -- the
 // Touch 2 does not map this. 0 is the voice as it was.
 constexpr int kModels = 3;
 void        SetModel(int m);
 int         Model_();
 const char* ModelName(int m);
-// Two fixed cables held outside the solver, added to a voice's own cable.
-// They carry feed in every cable mode; src < 0 clears one.
-void  SetBridge(int i, int src, int dst, float amt);
-// Commanded: what was just asked for, before the glide. Not what is heard.
-float CableCmd(int src, int dst);
-// Smoothed: what the audio is using now. Draw this one.
-float CableEff(int src, int dst);
-int  CableMode_();
-const char* CableName(int m);
+
+// S09/S10 up: one delay line between all seven voices, fed by all of them
+// and read by all of them
+void SetCommon(bool on);
+bool Common();
 
 void Init(float sample_rate, int block_size);
 
