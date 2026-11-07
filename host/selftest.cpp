@@ -924,10 +924,10 @@ static void TestNeverBlowsUp()
         K().mod    = corner ? 1.0f : (float)(seed % 4) / 3.0f;
         K().safe   = corner ? 0.0f : (float)(seed % 13) / 12.0f;
         K().unrest = 0.0f;
-        // Detune and the common line are in the loop too, so they belong in
-        // the sweep: half the seeds carry the line, corners carry both at full
-        K().detune = corner ? 1.0f : (float)(seed % 6) / 5.0f;
-        voices::SetCommon((seed % 2) == 0);
+        // The common line is in the loop too, so it belongs in the sweep
+        K().link = corner ? 1.0f : (float)(seed % 6) / 5.0f;
+        K().shimmer = corner ? 1.0f : (float)(seed % 8) / 7.0f;
+        voices::SetModMode((int)(seed % 3));
         RebuildRules();
 
         float now = 1.0f;
@@ -958,8 +958,9 @@ static void TestNeverBlowsUp()
     printf("  worst peak %.2f (seed %d) -- what the master limiter must take\n",
            worst_peak, worst_seed);
     Check("bounded everywhere", worst_peak < 50.0f);
-    voices::SetCommon(false);
-    K().detune = 0.0f;
+    voices::SetModMode(1);
+    K().link = 0.0f;
+    K().shimmer = 0.0f;
 }
 
 // Rule 1 says a loop above 1.0 rings by itself. The swell break sets exactly
@@ -1772,47 +1773,12 @@ static void TestEveryVoiceIsTunedBeforeItIsPlayed()
     Check("every voice is already on its own note", off == 0);
 }
 
-// DETUNE slides the loop off the whole number of voice periods it is snapped
-// to. Measured where the mechanism actually lives -- the effective delay in
-// periods of the voice's own note -- because the timbre change is a comb
-// moving a couple of milliseconds, which no band measure here can separate
-// from the wash.
-static void TestDetuneSlidesTheLoopOffTheNote()
-{
-    printf("DETUNE walks the loop off a whole number of the note's periods\n");
-    double frac[2] = {};
-    for(int d = 0; d < 2; d++)
-    {
-        synth::Init(kSr, kBlock);
-        wfc::Init(5);
-        K().detune = d ? 1.0f : 0.0f;
-        // Mod off: it adds to the delay too, and its wobble puts the tap
-        // anywhere between the periods while it runs
-        K().mod    = 0.0f;
-        float now  = 1.0f;
-        synth::Press(0);
-        // Long enough for the tap glide to arrive at the new distance
-        AdvanceSeconds(now, 4.0f);
-        const int    v = synth::PadVoice(0);
-        const double p = (double)voices::EffDly(v) * voices::Pitch(v);
-        frac[d]        = p - floor(p);
-        printf("  detune %.0f: loop is %.3f periods, %.3f of one over\n",
-               d ? 1.0f : 0.0f, p, frac[d]);
-        synth::Release(0);
-    }
-    // Snapped lands on a whole period either side of zero, so measure the
-    // distance to the nearest whole one, not the fraction itself
-    const double off0 = frac[0] < 0.5 ? frac[0] : 1.0 - frac[0];
-    Check("at zero the loop is still snapped to the note", off0 < 0.05);
-    Check("at full it sits half a period off", fabs(frac[1] - 0.5) < 0.08);
-    K().detune = 0.0f;
-}
-
-// LATCH keeps the pads that were down when the switch went down, and takes
-// anything pressed afterwards with them.
+// LATCH keeps exactly the pads that were down when the switch went down.
+// A pad pressed afterwards is momentary again, which is what makes the
+// switch a snapshot and not a sustain pedal.
 static void TestLatchKeepsThePadsDown()
 {
-    printf("LATCH holds the pads that were down, and collects new ones\n");
+    printf("LATCH keeps the pads held at the moment it went down, and no others\n");
     synth::Init(kSr, kBlock);
     wfc::Init(5);
     float now = 1.0f;
@@ -1822,56 +1788,259 @@ static void TestLatchKeepsThePadsDown()
     synth::Release(0);
     AdvanceSeconds(now, 0.5f);
     const bool kept = synth::PadOn(0) && wfc::Sounding(synth::PadVoice(0));
-    // Pressed and let go while the switch is down: the latch is read every
-    // poll, so it collects this one too
+    // Pressed after the switch went down. The panel calls Latch every poll,
+    // so this is the case that used to collect it.
     synth::Press(3);
     AdvanceSeconds(now, 0.3f);
     synth::Latch(true);
+    const bool sounds = synth::PadOn(3);
     synth::Release(3);
     AdvanceSeconds(now, 0.3f);
-    const bool got = synth::PadOn(3);
+    const bool dropped = !synth::PadOn(3);
     synth::Latch(false);
     AdvanceSeconds(now, 0.2f);
-    const bool cleared = !synth::PadOn(0) && !synth::PadOn(3);
-    printf("  kept %d, collected %d, cleared on release %d\n", (int)kept,
-           (int)got, (int)cleared);
-    Check("the released pad stays down", kept);
-    Check("a pad pressed while latched joins it", got);
-    Check("letting the switch go drops them all", cleared);
+    const bool cleared = !synth::PadOn(0);
+    printf("  kept %d, later pad sounds while held %d, drops on release %d, "
+           "cleared %d\n", (int)kept, (int)sounds, (int)dropped, (int)cleared);
+    Check("the pad held at the edge stays down", kept);
+    Check("a pad pressed later still plays while held", sounds);
+    Check("but it is not latched", dropped);
+    Check("letting the switch go clears the lot", cleared);
 }
 
-// THE COMMON LINE is one delay every voice feeds and reads, so a voice with
-// nothing touching it still rings with what the rest of the instrument is
-// doing. That is the whole claim, and an untouched voice's own line level is
-// where to read it.
-static void TestCommonLineRingsTheUntouchedVoices()
+// Share of energy above 3 kHz. The 500 Hz split BandRms uses cannot resolve
+// this: three quarters of the material is already above 500 Hz, so added
+// harmonics do not move it. Saturation products land high.
+static void TopShare(float& now, float secs, double& top, double& full)
 {
-    printf("the common line rings the voices nobody is touching\n");
-    double quiet[2] = {};
-    bool   ok[2]    = {};
+    float  hp1 = 0.0f, hp2 = 0.0f;
+    double t = 0, f = 0;
+    int    n = 0;
+    const float c = 1.0f - expf(-2.0f * 3.14159265f * 3000.0f / kSr);
+    for(int i = 0; i < (int)(secs / 0.01f); i++)
+    {
+        AdvanceSeconds(now, 0.01f);
+        for(int k = 0; k < kBlock; k++)
+        {
+            const float x = g_l[k];
+            hp1 += (x - hp1) * c;
+            const float y = x - hp1;
+            hp2 += (y - hp2) * c;   // two poles, so the skirt is not the signal
+            t += (double)(y - hp2) * (y - hp2);
+            f += (double)x * x;
+            n++;
+        }
+    }
+    top  = n ? sqrt(t / n) : 0;
+    full = n ? sqrt(f / n) : 0;
+}
+
+// THE LINK is one delay every voice feeds and reads, so a voice with
+// nothing touching it still rings with what the rest of the instrument is
+// doing. S35 is how much, and it has to grade: off, half and full in order.
+static void TestLinkRingsTheUntouchedVoices()
+{
+    printf("the link knob rings the voices nobody is touching, by degrees\n");
+    const float kv[3] = {0.0f, 0.5f, 1.0f};
+    double      q[3]  = {};
+    bool        ok    = true;
+    for(int c = 0; c < 3; c++)
+    {
+        synth::Init(kSr, kBlock);
+        wfc::Init(5);
+        K().fb     = 0.8f;
+        K().link = kv[c];
+        float now  = 1.0f;
+        synth::Press(0);
+        AdvanceSeconds(now, 4.0f);
+        const int held = synth::PadVoice(0);
+        for(int v = 0; v < wfc::kVoices; v++)
+            if(v != held)
+                q[c] += voices::LoopLevel(v);
+        if(!FiniteOutput())
+            ok = false;
+        printf("  knob %.1f: untouched voices sum %.5f\n", kv[c], q[c]);
+        synth::Release(0);
+    }
+    K().link = 0.0f;
+    Check("at zero the untouched voices are silent", q[0] < 1.0e-4);
+    Check("half rings them", q[1] > 1.0e-3);
+    Check("and full rings them harder", q[2] > q[1] * 1.3);
+    Check("bounded throughout", ok);
+}
+
+// The pool has to make something the voices were not already making. Simply
+// returning it into each line does not: that is a linear sum of the same
+// material, measured at +6.5 dB on the bus with the band split unmoved, and
+// it reads as nothing at all. Driving each loop's distortion with it does,
+// and this is the measurement that separates the two.
+static void TestLinkMakesNewContent()
+{
+    printf("the link dirties the voices, not just fills them\n");
+    double share[2] = {}, lvl[2] = {};
     for(int on = 0; on < 2; on++)
     {
         synth::Init(kSr, kBlock);
         wfc::Init(5);
-        K().fb = 0.8f;
-        voices::SetCommon(on != 0);
-        float now = 1.0f;
+        K().link = on ? 1.0f : 0.0f;
+        float now  = 1.0f;
         synth::Press(0);
         AdvanceSeconds(now, 4.0f);
-        // Every voice but pad 0's: none of them has been touched
-        const int held = synth::PadVoice(0);
-        for(int v = 0; v < wfc::kVoices; v++)
-            if(v != held)
-                quiet[on] += voices::LoopLevel(v);
-        ok[on] = FiniteOutput();
-        printf("  common %s: untouched voices sum %.5f, finite %d\n",
-               on ? "on " : "off", quiet[on], (int)ok[on]);
+        double top, full;
+        TopShare(now, 2.0f, top, full);
+        share[on] = full > 0 ? top / full : 0;
+        lvl[on]   = full;
+        printf("  knob %.0f: level %.4f, share above 3 kHz %.4f\n", on ? 1.0f : 0.0f,
+               full, share[on]);
         synth::Release(0);
-        voices::SetCommon(false);
     }
-    Check("off, the untouched voices are silent", quiet[0] < 1.0e-4);
-    Check("on, they ring", quiet[1] > 1.0e-3);
-    Check("and the whole thing stays bounded", ok[0] && ok[1]);
+    K().link = 0.0f;
+    printf("  x%.2f the level, x%.2f the top share\n",
+           lvl[0] > 0 ? lvl[1] / lvl[0] : 0, share[0] > 0 ? share[1] / share[0] : 0);
+    Check("it makes new high content, not just more of the same",
+          share[1] > share[0] * 1.5);
+}
+
+// S09/S10 picks what the mod follower moves: the delay alone, the blend the
+// instrument has always had, or the feedback alone. The claim is that the
+// ends are different in kind -- pitch against length -- and that the centre
+// is still the blend. Checked as a matrix rather than against thresholds:
+// for each dimension, the mode that owns it must move it furthest.
+static void TestModModesMoveDifferentThings()
+{
+    printf("each mod mode moves its own dimension and not the others\n");
+    // [mode][dimension]: 0 delay, 1 drive, 2 feedback
+    double sw[3][3] = {};
+    for(int m = 0; m < 3; m++)
+    {
+        synth::Init(kSr, kBlock);
+        wfc::Init(5);
+        K().mod = 1.0f;
+        voices::SetModMode(m);
+        float now = 1.0f;
+        for(int p = 0; p < 4; p++)
+            synth::Press(p);
+        AdvanceSeconds(now, 1.5f);
+        // Voice 1's pad is the one played below. The follower rides its own
+        // voice's level, so a pad held steady leaves it parked.
+        const int v = synth::PadVoice(1);
+        float     lo[3] = {9e9f, 9e9f, 9e9f}, hi[3] = {-9e9f, -9e9f, -9e9f};
+        for(int i = 0; i < 80; i++)
+        {
+            if(i % 20 == 0)
+                synth::Release(1);
+            if(i % 20 == 10)
+                synth::Press(1);
+            AdvanceSeconds(now, 0.05f);
+            const float x[3]
+                = {voices::EffDly(v), voices::EffDrv(v), voices::EffFb(v)};
+            for(int d = 0; d < 3; d++)
+            {
+                if(x[d] < lo[d]) lo[d] = x[d];
+                if(x[d] > hi[d]) hi[d] = x[d];
+            }
+        }
+        for(int d = 0; d < 3; d++)
+            sw[m][d] = hi[d] - lo[d];
+        printf("  %-8s dly %6.1f ms   drv %5.2f   fb %.3f\n",
+               m == 0 ? "delay" : (m == 1 ? "blend" : "feedback"),
+               sw[m][0] * 1000.0, sw[m][1], sw[m][2]);
+        for(int p = 0; p < 4; p++)
+            synth::Release(p);
+    }
+    K().mod = 0.5f;
+    voices::SetModMode(1);
+    Check("delay mode moves the delay furthest",
+          sw[0][0] > sw[1][0] && sw[0][0] > sw[2][0]);
+    Check("only the blend moves the drive at all",
+          sw[1][1] > sw[0][1] && sw[1][1] > sw[2][1]);
+    Check("feedback mode moves the feedback furthest",
+          sw[2][2] > sw[0][2] && sw[2][2] > sw[1][2]);
+}
+
+// S36, on the instrument rather than on a tone: the fader has to outlive the
+// dry tail without running the level away with it.
+// The shift itself, with nothing else in the way: a tone on the line input
+// and no pads, so the voices are silent and the only things between the
+// input and the output are the plate and the shimmer line.
+static void TestShimmerMakesAnOctave()
+{
+    printf("S36 puts an octave above whatever it is given\n");
+    const float kHz = 300.0f;
+    double      rel[2];
+    for(int w = 0; w < 2; w++)
+    {
+        synth::Init(kSr, kBlock);
+        wfc::Init(7);
+        K().shimmer = (float)w;
+        float in[kBlock];
+        float ph = 0.0f;
+        // Goertzel at the tone and at its octave, over the last second
+        double c1[2] = {0, 0}, c2[2] = {0, 0}, g = 0;
+        const int blocks = (int)(6.0f * kSr / (float)kBlock);
+        float     now    = 1.0f;
+        for(int b = 0; b < blocks; b++)
+        {
+            for(int i = 0; i < kBlock; i++)
+            {
+                in[i] = 0.3f * sinf(ph);
+                ph += 2.0f * 3.14159265f * kHz / kSr;
+                if(ph > 6.2831853f)
+                    ph -= 6.2831853f;
+            }
+            now += (float)kBlock / kSr;
+            synth::Control(now);
+            synth::Process(g_l, g_r, kBlock, in);
+            if(b < blocks - (int)(kSr / kBlock))
+                continue;
+            for(int i = 0; i < kBlock; i++)
+            {
+                const double t = g * 2.0 * 3.14159265 / kSr;
+                c1[0] += g_l[i] * cos(t * kHz);
+                c1[1] += g_l[i] * sin(t * kHz);
+                c2[0] += g_l[i] * cos(t * 2.0 * kHz);
+                c2[1] += g_l[i] * sin(t * 2.0 * kHz);
+                g += 1.0;
+            }
+        }
+        const double f = sqrt(c1[0] * c1[0] + c1[1] * c1[1]);
+        const double o = sqrt(c2[0] * c2[0] + c2[1] * c2[1]);
+        rel[w]         = f > 0 ? o / f : 0;
+        printf("  shimmer %.0f: octave is %.3f of the tone\n", (double)w, rel[w]);
+    }
+    K().shimmer = 0.0f;
+    Check("the octave is there only with the fader up", rel[1] > rel[0] * 4.0);
+}
+
+static void TestShimmerClimbsTheTail()
+{
+    printf("S36 pushes the tail up an octave a pass\n");
+    double share[2], lvl[2], tail[2];
+    for(int w = 0; w < 2; w++)
+    {
+        synth::Init(kSr, kBlock);
+        wfc::Init(5);
+        K().shimmer = (float)w;
+        float now = 1.0f;
+        synth::Press(0);
+        AdvanceSeconds(now, 3.0f);
+        double top, full;
+        TopShare(now, 2.0f, top, full);
+        share[w] = full > 0 ? top / full : 0;
+        lvl[w]   = full;
+        synth::Release(0);
+        AdvanceSeconds(now, 4.0f);
+        tail[w] = WindowRms(now, 1.0f);
+        printf("  shimmer %.0f: level %.4f  share above 3 kHz %.4f  tail %.5f\n",
+               (double)w, lvl[w], share[w], tail[w]);
+    }
+    K().shimmer = 0.0f;
+    // The share above 3 kHz is printed and not checked: the plate's output is
+    // dark enough that an octave of it still lands under 3 kHz, so the split
+    // cannot see the thing it was chosen to see. What proves this is not just
+    // a louder send is the octave itself, which TestShimmerMakesAnOctave
+    // measures directly against a tone.
+    Check("the tail outlives the dry one", tail[1] > tail[0] * 1.3);
 }
 
 static void TestHoldWakesTheChain()
@@ -1965,9 +2134,12 @@ int SelfTest()
     TestTheLedSeesBreaks();
     TestLeaningOnAPadBreaksIt();
     TestEveryVoiceIsTunedBeforeItIsPlayed();
-    TestDetuneSlidesTheLoopOffTheNote();
+    TestModModesMoveDifferentThings();
+    TestLinkMakesNewContent();
     TestLatchKeepsThePadsDown();
-    TestCommonLineRingsTheUntouchedVoices();
+    TestLinkRingsTheUntouchedVoices();
+    TestShimmerMakesAnOctave();
+    TestShimmerClimbsTheTail();
     TestHoldWakesTheChain();
     TestAPressDoesNotBreakItself();
     TestTheKnobDoesNotDragTheTap();

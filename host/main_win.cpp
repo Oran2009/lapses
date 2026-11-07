@@ -282,7 +282,7 @@ const char  kXpKey[5]  = {'Z', 0, 'X', '-', '='};
 const char* kKnobLabel[synth::kKnobs]
     = {"S32 delay", "S31 feedback", "S33 distortion", "S34 filter",
        "S30 mod",   "",             "",               "S37 HOLD",
-       "S35 detune"};
+       "S35 link", "S36 shimmer"};
 
 // Panel replica on the left, cards and GUI-only controls to its right.
 // Seven cards two abreast: one row of seven left the bars narrower than the
@@ -298,14 +298,14 @@ constexpr int kSwW = 140;
 // voice-model spike is GUI-only.
 constexpr int kSwitches   = 3;
 constexpr int kSwMaxCells = 3;
-const int     kSwCells[kSwitches] = {voices::kModels, 3, 2};
+const int     kSwCells[kSwitches] = {voices::kModels, 3, 3};
 Rect          sw_r[kSwitches][kSwMaxCells];
 int           sw_cell[kSwitches] = {0, 1, 1};
 
 const char* kSwLabel[kSwitches][kSwMaxCells]
-    = {{}, {"freeze", "--", "latch"}, {"common", "off"}};
+    = {{}, {"freeze", "--", "latch"}, {"delay", "blend", "feedback"}};
 const char* kSwName[kSwitches]
-    = {"voice model (V)", "S07/S08 (C)", "S09/S10 (T)"};
+    = {"voice model (V)", "S07/S08 (C)", "S09/S10 mod (T)"};
 
 // The model cells are named by the engine, so there is one list and not two
 const char* SwLabel(int k, int c)
@@ -321,7 +321,7 @@ void ApplySwitches()
     voices::SetModel(sw_cell[0]);
     synth::Freeze(sw_cell[1] == 0);
     synth::Latch(sw_cell[1] == 2);
-    voices::SetCommon(sw_cell[2] == 0);
+    voices::SetModMode(sw_cell[2]);
 }
 
 void Layout()
@@ -329,19 +329,21 @@ void Layout()
     auto X = [](float f) { return kPx + (int)(kPW * f); };
     auto Y = [](float f) { return kPy + (int)(kPH * f); };
     struct Spot { int k; float fx, fy; };
-    static const Spot knobs[] = {{1, .2f, .35f}, {0, .4f, .35f}, {2, .6f, .35f},
-                                 {3, .8f, .35f}, {4, .2f, .48f},
-                                 {8, .4f, .48f}};
+    static const Spot knobs[]
+        = {{1, .18f, .35f}, {0, .37f, .35f}, {2, .56f, .35f},
+           {3, .75f, .35f}, {4, .18f, .48f}, {8, .37f, .48f}};
     for(const Spot& sp : knobs)
     {
         knob_r[sp.k]    = {X(sp.fx) - 50, Y(sp.fy) - 46, 100, 96};
         knob_vert[sp.k] = false;
     }
     const int fh = Y(.54f) - Y(.29f);
-    knob_r[5] = {0, 0, 0, 0};   // S36 is unassigned
-    knob_r[7] = {X(.94f) - 18, Y(.29f), 36, fh};   // S37 hold
+    knob_r[5] = {0, 0, 0, 0};   // Control has no control of its own
     knob_r[6] = {0, 0, 0, 0};   // unrest has no control of its own now
-    knob_vert[7] = true;
+    // Two faders now, and the S34 knob moved in to .75 to clear them
+    knob_r[9] = {X(.87f) - 16, Y(.29f), 32, fh};   // S36 shimmer
+    knob_r[7] = {X(.95f) - 16, Y(.29f), 32, fh};   // S37 hold
+    knob_vert[9] = knob_vert[7] = true;
 
     // Engine pad order is P03 P04 P05 P06 P07 P08 P09
     static const float pf[synth::kPads][2] = {{.10f, .83f}, {.30f, .80f},
@@ -605,7 +607,7 @@ void Paint(HWND hw)
         Text(dc, kRx + 8, kGuiY + 6, "GUI ONLY - not on the panel", RGB(200, 180, 100));
         Text(dc, kRx + 16, kGuiY + 130,
              "pads A S D F G H J / 1-7   oct Z X   vol - =   break B   "
-             "settle N   switches V C T   F1-F9 + arrows: knob",
+             "settle N   switches V C T   F1-F10 + arrows: knob",
              dim);
     }
 
@@ -744,7 +746,7 @@ LRESULT CALLBACK Proc(HWND hw, UINT m, WPARAM w, LPARAM l)
             if(w == 'C')
                 sw_cell[1] = (sw_cell[1] + 1) % kSwCells[1];
             if(w == 'T')
-                sw_cell[2] = 1 - sw_cell[2];
+                sw_cell[2] = (sw_cell[2] + 1) % kSwCells[2];
             {
                 const int xi = w == 'Z' ? 0 : w == 'X' ? 2
                                : w == VK_OEM_MINUS ? 3 : w == VK_OEM_PLUS ? 4 : -1;

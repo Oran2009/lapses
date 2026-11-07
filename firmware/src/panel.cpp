@@ -128,15 +128,19 @@ void Poll()
     for(int i = 0; i < kAnalog; i++)
         analog[i].Process();
     // S30 Mod, S31 Feedback, S32 Delay, S33 Distortion, S34 Filter,
-    // S35 Shift. The S36 fader is unassigned; S37 is Hold.
-    static const int kKnobOf[kAnalog] = {4, 1, 0, 2, 3, 8, -1, 7};
+    // S35 Link, S36 Shimmer, S37 Hold.
+    static const int kKnobOf[kAnalog] = {4, 1, 0, 2, 3, 8, 9, 7};
     for(int i = 0; i < kAnalog; i++)
         synth::SetKnob(kKnobOf[i], analog[i].Value());
     // S07/S08 up freezes the solver, down latches the pads
     const int sa = switch_a.Read();
     synth::Freeze(sa == Switch3::POS_UP);
     synth::Latch(sa == Switch3::POS_DOWN);
-    voices::SetCommon(switch_b.Read() == Switch3::POS_UP);
+    // S09/S10 up delay, centre the usual blend, down feedback
+    const int sb = switch_b.Read();
+    voices::SetModMode(sb == Switch3::POS_UP      ? 0
+                       : sb == Switch3::POS_DOWN ? 2
+                                                 : 1);
 
     const uint16_t changed = (uint16_t)(pad_state ^ last_pads);
     for(int i = 0; i < kPads; i++)

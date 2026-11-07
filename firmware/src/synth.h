@@ -19,8 +19,8 @@ void Press(int pad);
 void Release(int pad);
 // True while the pad is sounding, whether from contact or from the latch
 bool PadOn(int pad);
-// S07/S08 down: whatever is held when it goes down stays down, and anything
-// pressed while it is down joins them. Up clears them all.
+// S07/S08 down: the pads held at that moment stay down. Pads pressed
+// afterwards are momentary as usual. Letting the switch go clears them.
 void Latch(bool on);
 bool Latched(int pad);
 // 0..1 contact force on a held pad. Leaning past the threshold breaks the
@@ -34,7 +34,7 @@ float PressureRest(int pad);
 bool ShiftOctave(int delta);
 int  Octave();
 
-constexpr int kKnobs = 9;   // HANDOFF 4.2's six, plus Unrest, Space, Shift
+constexpr int kKnobs = 10;   // HANDOFF 4.2's six, plus Unrest, Hold, Link, Shimmer
 
 // 0..1 each. Rebuilds the rules and schedules the debounced heal.
 void SetKnob(int i, float v);

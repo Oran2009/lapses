@@ -65,7 +65,7 @@ inline int ModDepthOf(int o) { return o % 4; }
 // The six knobs, each 0..1 (4.2)
 struct Knobs
 {
-    float delay, fb, drive, filter, mod, safe, unrest, hold, detune;
+    float delay, fb, drive, filter, mod, safe, unrest, hold, link, shimmer;
 };
 
 // What the rules allow at the current strictness (4.4)

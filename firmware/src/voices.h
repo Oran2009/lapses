@@ -37,10 +37,10 @@ void        SetModel(int m);
 int         Model_();
 const char* ModelName(int m);
 
-// S09/S10 up: one delay line between all seven voices, fed by all of them
-// and read by all of them
-void SetCommon(bool on);
-bool Common();
+// S09/S10: what the mod follower moves. 0 delay (the echoes bend), 1 the
+// blend it has always been, 2 feedback (the loop rings longer).
+void SetModMode(int m);
+int  ModMode();
 
 void Init(float sample_rate, int block_size);
 

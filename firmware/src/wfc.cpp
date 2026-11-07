@@ -36,7 +36,7 @@ inline float Smooth(float a, float b, float x)
     return k * k * (3.0f - 2.0f * k);
 }
 
-Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f, 0.0f};
+Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f, 0.0f, 0.0f};
 bool   frozen = false;
 // How a wave travels: the gap between one voice changing and the next, and,
 // past kSpread, whether it carries into the other group. It had a fader of

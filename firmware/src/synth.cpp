@@ -41,6 +41,7 @@ float           rest_at[kPads]  = {};
 bool            armed[kPads]    = {};
 
 bool  held[kPads], latched[kPads];
+bool  latch_on = false;
 // A latched pad goes on sounding with nothing touching it. Everything that
 // asks "is this pad playing" means this, not the contact.
 inline bool PadActive(int p) { return held[p] || latched[p]; }
@@ -90,6 +91,64 @@ float          in_env = 0.0f, in_hold = 0.0f, in_mix = 0.0f;
 // The reverb is fed above the mud, not through it
 float          send_hp[2];
 float          send_hp_c = 0.0f;
+// SHIMMER, on S36. A line of its own, fed by the plate and regenerating
+// through an octave shift, so each pass of the tail arrives twelve semitones
+// higher than the last. Not the plate feeding back into itself: its combs
+// run at 0.96 and so have 28 dB at their peaks, which left one sixteenth of
+// a turn between hearing nothing and the thing taking off. A loop whose only
+// gain is the knob cannot do that. The octave is two taps on the line, read
+// one sample per sample faster than it is written, half a window apart and
+// triangle-crossfaded. The cheapest shift there is, and the warble it leaves
+// is wanted here.
+// Grains, because two taps that restart in the same place every lap comb
+// against each other the same way every lap, and that regularity is what is
+// heard as a stutter -- slowing it from 16 Hz to 8 Hz only slowed the
+// stutter down. Each grain picks a new place in the line to read from every
+// time its window closes, so the comb is still there and is never the same
+// twice. Four of them, staggered a quarter of a window apart: triangles
+// only sum flat at two grains and at four, and at three they ripple 22% --
+// which is an amplitude wobble at the lap rate, exactly the thing being
+// chased out. Four rather than two because more grains sounding at once is
+// a denser comb and a less distinct one.
+constexpr int  kShimGrain  = 4096;   // 128 ms, the length that measured best
+constexpr int  kShimGrains = 4;
+// Twice the grain, so a grain's read can be offset by up to a whole window
+// without ever wrapping inside itself
+constexpr int  kShimLen = kShimGrain * 2;
+float SLOW_BSS shim_buf[2][kShimLen];
+int            shim_wr = 0;
+float          shim_ph[kShimGrains];
+float          shim_off[kShimGrains];
+uint32_t       shim_rng = 1;
+// Every pass is another octave, so without this the tail walks into the top
+// of the band and parks there. 6 kHz, not the 2 kHz it started at: at 2 kHz
+// the second pass was already gone and the fader read as a level control
+// (the top-of-band share rose less than the level did, which is the test).
+float          shim_lp[2];
+float          shim_lp_c = 0.0f;
+float          shim_g    = 0.0f;
+// The shift is unity, so the loop is stable for any feedback under one; this
+// leaves a few passes audible at the top of the fader and stops there.
+constexpr float kShimFb  = 0.75f;
+// The plate's output is quiet and dark, so the line has to be fed above it,
+// and this sets how loud the top of the fader is. Backed off by ear twice,
+// 4.0 to 2.5. The floor is near: at 2.0 the shimmer no longer outlives the
+// dry tail, which is the one thing the fader is for.
+constexpr float kShimIn  = 2.5f;
+
+// One interpolated read,  samples behind the write head
+float ShimRd(const float* b, float d)
+{
+    const int   di = (int)d;
+    const float fr = d - (float)di;
+    int         i0 = shim_wr - di;
+    if(i0 < 0)
+        i0 += kShimLen;
+    int i1 = i0 - 1;
+    if(i1 < 0)
+        i1 += kShimLen;
+    return b[i0] + (b[i1] - b[i0]) * fr;
+}
 
 float Verb(int ch, float x)
 {
@@ -169,8 +228,8 @@ void SyncSounding(float now)
 const char* KnobName(int i)
 {
     static const char* n[kKnobs]
-        = {"Delay",  "Feedback", "Distortion", "Filter", "Mod",
-           "Control", "Unrest",   "Hold",       "Detune"};
+        = {"Delay",   "Feedback", "Distortion", "Filter", "Mod",
+           "Control", "Unrest",   "Hold",       "Link",   "Shimmer"};
     return i >= 0 && i < kKnobs ? n[i] : "?";
 }
 
@@ -187,6 +246,7 @@ void Init(float sample_rate, int block_size)
         rest_at[p]  = 0.0f;
         armed[p]    = true;
     }
+    latch_on       = false;
     octave         = 0;
     wfc::K().hold = 0.0f;
     now_s          = 0.0f;
@@ -201,6 +261,17 @@ void Init(float sample_rate, int block_size)
     memset(pre_buf, 0, sizeof(pre_buf));
     memset(pre_i, 0, sizeof(pre_i));
     memset(send_hp, 0, sizeof(send_hp));
+    memset(shim_buf, 0, sizeof(shim_buf));
+    memset(shim_lp, 0, sizeof(shim_lp));
+    shim_wr = 0;
+    for(int g = 0; g < kShimGrains; g++)
+    {
+        shim_ph[g]  = (float)kShimGrain * (float)g / (float)kShimGrains;
+        shim_off[g] = 0.0f;
+    }
+    shim_rng  = 1;
+    shim_g    = 0.0f;
+    shim_lp_c = 1.0f - expf(-2.0f * 3.14159265f * 6000.0f / sr);
     in_env = in_hold = in_mix = 0.0f;
     send_hp_c = 1.0f - expf(-2.0f * 3.14159265f * 180.0f / sr);
     lim_env = 0.0f;
@@ -315,12 +386,16 @@ void Release(int pad)
         wfc::RerollTail(v, now_s);
 }
 
-// S07/S08 down. Called every poll, so pads pressed and let go while it is
-// down keep stacking up; off clears the lot.
+// S07/S08 down. Called every poll, so it acts on the edge only: the pads
+// held at the moment the switch goes down are the ones it keeps. A pad
+// pressed afterwards plays while it is touched and stops when it is let go.
 void Latch(bool on)
 {
+    if(on == latch_on)
+        return;
+    latch_on = on;
     for(int p = 0; p < kPads; p++)
-        latched[p] = on && (latched[p] || held[p]);
+        latched[p] = on && held[p];
     SyncSounding(now_s);
 }
 
@@ -447,14 +522,53 @@ void Process(float* l, float* r, int n, const float* in)
     constexpr float kSpace = 0.3f;
     constexpr float send   = 1.8f * kSpace;
     constexpr float dry    = 1.0f - 0.8f * kSpace;
+    // A fader is swept, and stepping the regeneration once a block zippered
+    const float sk = wfc::K().shimmer < 0.0f
+                         ? 0.0f
+                         : (wfc::K().shimmer > 1.0f ? 1.0f : wfc::K().shimmer);
+    shim_g += (sk - shim_g)
+              * (1.0f - expf(-(float)n / sr / 0.05f));
     for(int i = 0; i < n; i++)
     {
         const float sl = l[i], sr_ = r[i];
         send_hp[0] += (sl - send_hp[0]) * send_hp_c;
         send_hp[1] += (sr_ - send_hp[1]) * send_hp_c;
-        l[i] = Limit((sl * dry + Verb(0, (sl - send_hp[0]) * send) * 0.7f)
+        float up[2] = {0.0f, 0.0f};
+        for(int g = 0; g < kShimGrains; g++)
+        {
+            // Falling by one sample per sample is what makes the octave:
+            // the read walks forward through the line at twice the rate it
+            // is written.
+            shim_ph[g] -= 1.0f;
+            if(shim_ph[g] < 0.0f)
+            {
+                shim_ph[g] += (float)kShimGrain;
+                shim_rng    = shim_rng * 1664525u + 1013904223u;
+                shim_off[g] = (float)(shim_rng >> 19) * (float)kShimGrain
+                              / 8192.0f;
+            }
+            // A straight triangle, not equal power: the gains have to sum
+            // flat and not to 1.41, or the window itself is gain and the
+            // loop runs away well under its stated feedback.
+            const float w = 1.0f - fabsf(shim_ph[g] - kShimGrain * 0.5f)
+                                       / (kShimGrain * 0.5f);
+            const float d = shim_ph[g] + shim_off[g];
+            for(int c = 0; c < 2; c++)
+                up[c] += ShimRd(shim_buf[c], d) * w;
+        }
+        // Staggered triangles sum flat, to half their count
+        for(int c = 0; c < 2; c++)
+            shim_lp[c] += (up[c] * (2.0f / kShimGrains) - shim_lp[c])
+                          * shim_lp_c;
+        const float wetl     = Verb(0, (sl - send_hp[0]) * send);
+        const float wetr     = Verb(1, (sr_ - send_hp[1]) * send);
+        const float fb       = kShimFb * shim_g;
+        shim_buf[0][shim_wr] = wetl * kShimIn + shim_lp[0] * fb;
+        shim_buf[1][shim_wr] = wetr * kShimIn + shim_lp[1] * fb;
+        shim_wr              = shim_wr + 1 >= kShimLen ? 0 : shim_wr + 1;
+        l[i] = Limit((sl * dry + (wetl + shim_lp[0] * shim_g) * 0.7f)
                      * gain_lin);
-        r[i] = Limit((sr_ * dry + Verb(1, (sr_ - send_hp[1]) * send) * 0.7f)
+        r[i] = Limit((sr_ * dry + (wetr + shim_lp[1] * shim_g) * 0.7f)
                      * gain_lin);
     }
 

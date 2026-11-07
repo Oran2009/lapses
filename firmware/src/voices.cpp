@@ -68,6 +68,29 @@ constexpr Model kModel[kModels] = {
 int cur_model = 0;
 inline const Model& M() { return kModel[cur_model]; }
 
+// S09/S10 picks what the mod follower moves.
+//
+// Centre is the blend the instrument has always had: all three move together,
+// each by its own scaling. It is the resting position because concentrating
+// the mod changes the resting sound -- with everything in the delay the press
+// duck measured 0.95 against its 0.94 bound, and with everything in the drive
+// it went the wrong way entirely (1.46, the wash rising on a press).
+//
+// Up and down concentrate it into one dimension and boost it, so the movement
+// reads as pitch or as length instead of a little of each. Drive is not one
+// of the choices: the Link knob already drives every loop's distortion, and
+// two controls on one dimension is the redundancy the switch was meant to
+// avoid. Boosts measured as the swing of the value each mode owns, against
+// the same run in the other modes (baselines: delay 678 ms, feedback 0.375):
+// delay x6 reaches 1085 ms, feedback x3 reaches 1.225 against its 1.3 clamp.
+enum
+{
+    kModDelay = 0,
+    kModBlend,
+    kModFb
+};
+int mod_mode = kModBlend;   // the switch at rest
+constexpr float kModBoost[3] = {6.0f, 1.0f, 3.0f};
 
 float sr        = 48000.0f;
 float inv_sr    = 1.0f / 48000.0f;
@@ -310,19 +333,39 @@ struct Voice
 Voice     v[wfc::kVoices];
 float SLOW_BSS delay_mem[wfc::kVoices][kDelayMax];
 
-// THE COMMON LINE, on S09/S10 up. One delay that every voice feeds and every
-// voice reads, so a single pad is answered by all seven lines and a voice
-// nobody is touching still rings with what the others are doing. Not the
-// cables again: there is nothing routed and nothing for the solver to
-// arbitrate -- seven in, one line, seven out.
-constexpr float kCommDly = 0.41f;   // a multiple of no voice's period, on purpose
-constexpr float kCommFb  = 0.55f;   // what the common line gives back to itself
-constexpr float kCommRet = 0.25f;   // and how much of it lands in each voice
-bool  comm_on = false;
-float comm_g  = 0.0f;   // ramped: a step to full is a click in all seven at once
-float SLOW_BSS comm_mem[kDelayMax];
-int   comm_wr   = 0;
-float comm_prev = 0.0f, comm_lp = 0.0f, comm_lp_c = 0.0f;
+// THE LINK, on S35. One delay that every voice feeds and every voice
+// reads, so a single pad is answered by all seven lines and a voice nobody is
+// touching still rings with what the others are doing. Not the cables again:
+// there is nothing routed and nothing for the solver to arbitrate -- seven
+// in, one line, seven out. The knob is how much, and zero is out of circuit.
+constexpr float kLinkDly = 0.41f;   // a multiple of no voice's period, on purpose
+// Measured at the bus with one pad held, against the same run with the line
+// out. 1/7 and 0.25 put the untouched voices 26 dB under the held one, which
+// is inaudible; 1/sqrt(7) in and 0.30 back puts them 9 dB under, which is the
+// effect. Past 0.40 the return buys 3 dB of presence for twice the level
+// jump, so this is the knee, not the ceiling.
+float kLinkSend = 0.38f;   // 1/sqrt(7): seven different notes, not seven copies
+float kLinkFb   = 0.55f;
+float kLinkRet  = 0.20f;
+// Returning the pool into each line only ADDS the pool to it, and a linear
+// sum of the same material is a level change the wash hides: measured at
+// +6.5 dB on the bus with the band split unmoved, which reads as nothing.
+// So the pool also DRIVES each loop's distortion. The busier the whole
+// instrument is, the dirtier all seven voices get -- nonlinear, so it makes
+// something the voices were not already making.
+// Swept against the share of output above 3 kHz, which is where saturation
+// products land -- the 500 Hz split BandRms uses cannot see them, three
+// quarters of the material is already above it. Off reads 0.068; the linear
+// return alone reaches only 0.078, and this takes it to 0.135. Trading
+// return for drive buys character at a level that saturates either way, so
+// the return is only as high as it needs to be for the untouched voices to
+// ring visibly.
+constexpr float kLinkDrv = 9.0f;
+float link_env = 0.0f, link_env_c = 0.0f;
+float link_g = 0.0f;   // ramped: a jump to full is a click in all seven at once
+float SLOW_BSS link_mem[kDelayMax];
+int   link_wr   = 0;
+float link_prev = 0.0f, link_lp = 0.0f, link_lp_c = 0.0f;
 
 // The coefficients, rebuilt whenever dt changes (which is never, in practice)
 struct
@@ -413,10 +456,16 @@ void Init(float sample_rate, int block_size)
     for(bool& h : pad_held)
         h = true;
     loop_hp_c = 1.0f - expf(-2.0f * 3.14159265f * kLoopHpHz * inv_sr);
-    comm_lp_c = 1.0f - expf(-2.0f * 3.14159265f * 2000.0f * inv_sr);
-    memset(comm_mem, 0, sizeof(comm_mem));
-    comm_wr   = 0;
-    comm_prev = comm_lp = comm_g = 0.0f;
+    link_lp_c = 1.0f - expf(-2.0f * 3.14159265f * 2000.0f * inv_sr);
+    // Init leaves the engine in a known state: both shells re-assert the
+    // switch every poll, so this only matters to whoever calls Init next
+    mod_mode  = kModBlend;
+    // 30 ms: the pool's level, not its waveform
+    link_env_c = 1.0f - expf(-inv_sr / 0.03f);
+    link_env   = 0.0f;
+    memset(link_mem, 0, sizeof(link_mem));
+    link_wr   = 0;
+    link_prev = link_lp = link_g = 0.0f;
 
     for(int i = 0; i <= kSinLen; i++)
         sin_tab[i] = sinf(2.0f * 3.14159265358979f * (float)i / (float)kSinLen);
@@ -478,6 +527,9 @@ void Init(float sample_rate, int block_size)
 }
 
 // SPIKE: the voice worlds
+void SetModMode(int m) { mod_mode = m >= 0 && m <= kModFb ? m : kModBlend; }
+int  ModMode() { return mod_mode; }
+
 void SetModel(int m)
 {
     m = m >= 0 && m < kModels ? m : 0;
@@ -490,9 +542,6 @@ void SetModel(int m)
     for(int i = 0; i < wfc::kVoices; i++)
         SetPartialFreqs(v[i], true);
 }
-void SetCommon(bool on) { comm_on = on; }
-bool Common() { return comm_on; }
-
 int         Model_() { return cur_model; }
 const char* ModelName(int m)
 {
@@ -660,18 +709,14 @@ void Control(float now, float dt)
         const float feff
             = Clamp((on ? F : (F < 0.75f ? F : 0.75f)) * fbm, 0.0f, 1.3f);
         // A broken delay is no longer in tune with the voice's pitch; an
-        // unbroken one is snapped to a whole number of its periods, which is
-        // what makes the echoes reinforce instead of smear
-        // S35 DETUNE slides it back off, by up to half a period: the comb's
-        // teeth walk off the voice's harmonics and onto the gaps between
-        // them, so the loop rings a hollow ghost the pad is not playing.
-        // Half a period is the whole of the range -- a full one is the snap
-        // again, one echo further back.
+        // unbroken one is snapped to a whole number of its periods.
+        // Measured, the snap is inaudible: each partial random-walks +-8
+        // cents (below) and the loop's comb teeth are about 16 cents apart,
+        // so every partial sweeps a whole tooth and there is nothing
+        // stationary for the comb to be tuned to. Kept because it costs
+        // nothing, not because it can be heard.
         const float t0 = base * D * M().dly_mul * (skew ? wfc::kSkew : 1.0f);
-        float       d
-            = skew ? t0
-                   : (floorf(t0 * vo.hz + 0.5f) + 0.5f * wfc::K().detune)
-                         / vo.hz;
+        float       d  = skew ? t0 : floorf(t0 * vo.hz + 0.5f) / vo.hz;
         if(!skew && d * vo.hz < 1.0f)
             d = 1.0f / vo.hz;
         const float dly = Clamp(d, 0.02f, dly_max < 1.9f ? dly_max : 1.9f);
@@ -707,10 +752,12 @@ void Control(float now, float dt)
         // The mod rides the envelope, so a silent voice's line is still
         const float dpe = wfc::DP[wfc::ModDepthOf(lo)] * modm * vo.amp;
         vo.mspeed_t      = mspeed0 * wfc::MS[wfc::ModSpeedOf(lo)];
-        vo.m_dly_t      = dly * 0.08f * dpe;
-        vo.m_fb_t       = 0.2f * dpe;
-        vo.depth_now    = dpe;
-        vo.m_pre_t      = pre * 0.35f * dpe;
+        const float dpb   = dpe * kModBoost[mod_mode];
+        const bool  blend = mod_mode == kModBlend;
+        vo.m_dly_t = blend || mod_mode == kModDelay ? dly * 0.08f * dpb : 0.0f;
+        vo.m_fb_t  = blend || mod_mode == kModFb ? 0.2f * dpb : 0.0f;
+        vo.m_pre_t = blend ? pre * 0.35f * dpb : 0.0f;
+        vo.depth_now = dpe;
 
         // A break is an event, a repair is a recovery, so they do not travel
         // the same way. Gain and drive snap to the broken value and heal back
@@ -875,9 +922,10 @@ inline float Rd(const float* line, int wr, float d)
 void Process(float* out_l, float* out_r, int n, const float* in,
              float in_mix)
 {
-    Approach(comm_g, comm_on ? 1.0f : 0.0f, Coeff(0.05f, (float)n * inv_sr));
-    const float cret = kCommRet * comm_g;
-    const bool  cact = comm_g > 1.0e-4f;
+    Approach(link_g, Clamp(wfc::K().link, 0.0f, 1.0f),
+             Coeff(0.05f, (float)n * inv_sr));
+    const float lret = kLinkRet * link_g;
+    const bool  lact = link_g > 1.0e-4f;
 
     AdvanceTaps((float)n * inv_sr);
     // Resolved once a block: the mod and every smoothed value hold still
@@ -927,6 +975,9 @@ void Process(float* out_l, float* out_r, int n, const float* in,
         // post is NOT modulated: that asymmetry is what lets the mod change
         // the loop's gain and not just its colour
         postg[i] = 1.0f / vo.pre;
+        // post is left alone, so this changes the loop's grit and not its
+        // level, the same asymmetry the mod uses
+        preg[i] *= 1.0f + kLinkDrv * link_env * link_g;
 
         // Mid-crossfade both taps sound; report the louder one, so the
         // display still says what you are hearing
@@ -938,10 +989,10 @@ void Process(float* out_l, float* out_r, int n, const float* in,
     for(int s = 0; s < n; s++)
     {
         float l = 0.0f, r = 0.0f;
-        // What the common line put out last sample, and what the voices will
+        // What the link put out last sample, and what the voices will
         // put into it this one
-        const float cpv  = comm_prev;
-        float       csum = 0.0f;
+        const float lpv  = link_prev;
+        float       lsum = 0.0f;
         // Captured before anything is written, so every feedback tap in this
         // sample reads the same previous-sample output
         float prev[wfc::kVoices];
@@ -977,8 +1028,8 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             const float dry = vo.vlp.Process(src) * vo.vca;
 
             // What goes into the line: the voice, its own feedback, and
-            // whatever the whole instrument left in the common line
-            const float in = dry + fbg[i] * prev[i] + cret * cpv;
+            // whatever the whole instrument left in the link
+            const float in = dry + fbg[i] * prev[i] + lret * lpv;
 
             // Write, then read `dsamp` samples back, interpolated because the
             // repair glide moves the tap within the block
@@ -1023,7 +1074,7 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             const float sh  = Shape(f * preg[i]);
             const float pst = sh * postg[i];
             vo.post_prev    = pst;
-            csum += pst;
+            lsum += pst;
             vo.lvl_sum += pst < 0.0f ? -pst : pst;
             vo.lvl_n++;
 
@@ -1054,21 +1105,21 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             dsamp2[i] += dsamp2i[i];
             dsampn[i] += dsampni[i];
         }
-        if(cact)
+        if(lact)
         {
             // Write then read, exactly as a voice's own line does
-            comm_mem[comm_wr] = csum * (1.0f / (float)wfc::kVoices)
-                                + kCommFb * comm_prev;
-            const float co = Rd(comm_mem, comm_wr, kCommDly * sr);
-            comm_wr        = comm_wr + 1 >= kDelayMax ? 0 : comm_wr + 1;
-            comm_lp += (co - comm_lp) * comm_lp_c;
+            link_mem[link_wr] = lsum * kLinkSend + kLinkFb * link_prev;
+            const float co = Rd(link_mem, link_wr, kLinkDly * sr);
+            link_wr        = link_wr + 1 >= kDelayMax ? 0 : link_wr + 1;
+            link_lp += (co - link_lp) * link_lp_c;
             // Soft clip, not a limiter: the path out through the voices and
             // back can pass unity at high feedback, and this bounds it the
             // same way each voice's own drive bounds its own loop.
-            comm_prev = Shape(comm_lp);
+            link_prev = Shape(link_lp);
+            link_env += (fabsf(link_prev) - link_env) * link_env_c;
         }
         else
-            comm_prev = comm_lp = 0.0f;
+            link_prev = link_lp = link_env = 0.0f;
 
         out_l[s] += l;
         out_r[s] += r;
