@@ -33,12 +33,26 @@ constexpr int kRoot = 9;   // A
 // so a deliberate push stands out and easing off re-arms at once.
 constexpr float kLean    = 0.25f;   // rise over resting that counts
 constexpr float kFloor   = 0.3f;    // below this it is a brush, not a lean
-constexpr float kRestUp  = 0.8f;    // seconds for rest to absorb a push
+// 0.8 here made the threshold a rate and not a size: rest climbed with
+// the finger and ate the lean, so a push of exactly kLean never fired at
+// any speed, +0.40 only inside half a second and +0.70 only inside two.
+// Measured on the board over 203 presses: every lean past 250 broke and
+// none under it did, with eleven missing by less than 50 -- one of them a
+// press that reached 0.97 of full force, applied gradually.
+constexpr float kRestUp  = 4.0f;    // seconds for rest to absorb a push
 constexpr float kRestDn  = 0.15f;   // and to follow a finger easing off
+constexpr float kRelax   = 0.10f;   // easing off this much re-arms a pad
+// Only while a fresh press is still settling, which is a different thing
+// from the pad being disarmed by a break it just fired: there rest must
+// stay put, or the leaned-on force becomes the new resting one and the
+// relax that follows cannot get back under it in time to re-arm.
+constexpr float kRestSettle = 0.05f;
 float           pressure[kPads] = {};
 float           rest[kPads]     = {};
 float           rest_at[kPads]  = {};
+float           peak[kPads]     = {};
 bool            armed[kPads]    = {};
+bool            settling[kPads] = {};
 
 bool  held[kPads], latched[kPads];
 bool  latch_on = false;
@@ -308,6 +322,16 @@ void SetPressure(int pad, float p)
     if(pad < 0 || pad >= kPads)
         return;
     pressure[pad] = p;
+    // Both the board and the GUI poll every pad, held or not, so without
+    // this the idle zeroes between presses consumed the reseed below: the
+    // resting force was already 0 when the finger landed, every press was
+    // therefore a lean of its own full size, and the break fired at a fixed
+    // force instead of at a push past where you started.
+    if(!held[pad])
+    {
+        rest[pad] = -1.0f;
+        return;
+    }
     // A fresh press has no resting force yet, so seed it rather than read a
     // rise from zero and break on every single press
     if(rest[pad] < 0.0f)
@@ -322,15 +346,32 @@ void SetPressure(int pad, float p)
         // the tile of the note being played as it spoke. Arming waits for
         // the finger to settle, which the lean < kLean * 0.4 test below
         // does once rest has caught up.
-        armed[pad]   = false;
+        armed[pad]    = false;
+        settling[pad] = true;
+        peak[pad]     = p;
         return;
     }
     const float lean = p - rest[pad];
-    if(lean < kLean * 0.4f)
-        armed[pad] = true;
-    else if(lean >= kLean && p >= kFloor && armed[pad] && held[pad])
+    if(!armed[pad])
+    {
+        if(p > peak[pad])
+            peak[pad] = p;
+        // Two ways in. A fresh press arms once it settles, which is the
+        // seed catching up. After a break the seed is long done and rest
+        // climbs too slowly to catch up on its own, so what arms the pad
+        // is the finger easing off -- the relax half of a push. Measured:
+        // re-arming off rest alone cost two thirds of a lean-relax-lean
+        // gesture once rest was slowed enough to stop eating slow leans.
+        if(lean < kLean * 0.4f || p < peak[pad] - kRelax)
+        {
+            armed[pad]    = true;
+            settling[pad] = false;
+        }
+    }
+    else if(lean >= kLean && p >= kFloor && held[pad])
     {
         armed[pad] = false;
+        peak[pad]  = p;
         const int v = kPadVoice[pad];
         if(v >= 0)
             wfc::BreakRule(-1, v / wfc::kGroupSize, 0.0f, now_s, v);
@@ -340,10 +381,16 @@ void SetPressure(int pad, float p)
     // and the desktop every block, hence a time constant and not a rate.
     const float dt = now_s - rest_at[pad];
     rest_at[pad]   = now_s;
+    // A fresh press has to be caught, not absorbed: the panel's ramp means
+    // the seed above is only half the finger's real force, and at kRestUp
+    // the rest of that ramp read as a lean for a second and a half -- long
+    // enough that a push right after the press did nothing, which is how it
+    // felt on the board. Only while settling, though: after a break it is
+    // the relax that re-arms the pad, not rest catching up.
+    const float up = settling[pad] ? kRestSettle : kRestUp;
     if(dt > 0.0f)
         rest[pad] += (p - rest[pad])
-                     * (1.0f - expf(-dt / (p > rest[pad] ? kRestUp
-                                                         : kRestDn)));
+                     * (1.0f - expf(-dt / (p > rest[pad] ? up : kRestDn)));
 }
 
 float PressureRest(int pad)

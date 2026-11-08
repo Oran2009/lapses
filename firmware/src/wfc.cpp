@@ -514,7 +514,17 @@ float Ripple() { return ripple; }
 // The release outlasts the attack by more than the prototype had it: the
 // voices were cutting off before their own echoes.
 float ReleaseT() { return Clamp(DelayBase() * 6.5f, 0.45f, 6.5f); }
-float AttackT() { return Clamp(DelayBase() * 3.0f, 0.2f, 3.0f) * 0.35f; }
+// NOT tied to the delay, though the release still is. Every other thing the
+// Delay knob sets is how long something takes to answer something else, and
+// a long echo earning a long release is that: the loop is still fed while it
+// rings. An attack answers nothing -- it is the press itself. Tied to the
+// knob it reached 0.95 s at the top, where a voice was 35% up at 150 ms and
+// still climbing at 700 ms, by which time the lift that announces a press
+// (kFreshT, squared) is spent: the note arrived after its own announcement.
+// 0.243 s is exactly what the link gave at the Delay knob's own default,
+// so the setting most played is bit-for-bit unchanged and only the long
+// end moves.
+float AttackT() { return 0.243f; }
 float ModSpeed0() { return Clamp(1.0f / (DelayBase() * 8.0f), 0.08f, 2.5f); }
 float FbMul() { return Lerp(0.5f, 1.5f, knob.fb); }
 float DrvMul() { return Lerp(0.4f, 1.6f, knob.drive); }

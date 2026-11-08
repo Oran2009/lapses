@@ -25,10 +25,17 @@ bool     pads_ok   = false;
 uint16_t pad_state = 0, last_pads = 0;
 int      blink     = 0;
 
-// Delta at full press, per playable electrode, measured on this board by
-// Synthux Academy (github.com/Synthux-Academy/TouchString, touch/pads.cpp)
-const float kMaxDelta[synth::kPads]
-    = {375.0f, 460.0f, 375.0f, 375.0f, 375.0f, 425.0f, 425.0f};
+// Delta at full press. One number for every pad: the MPR121 autoconfigures
+// each electrode's charge current into the same window at boot, so it has
+// already equalised them on whatever board it is soldered to. The seven
+// inherited values (375/460/375/375/375/425/425, from Synthux Academy's
+// github.com/Synthux-Academy/TouchString) had the right average and the
+// wrong shape -- over 165 logged presses this board read 364 to 428 across
+// all seven, a spread of +-8% against the table's +-11%, and not in the
+// same places: pad 1 was configured highest and is ordinary, pad 3 is the
+// weakest pad there is. 400 leaves 7 of those 165 presses saturated against
+// 31 at 375, with the median press at 0.70 -- room above it to lean into.
+constexpr float kMaxDelta = 400.0f;
 float pressure[synth::kPads] = {};
 int   press_turn             = 0;
 
@@ -106,7 +113,7 @@ void PollPads()
         {
             // Squared, so an ordinary press sits low and the top of the
             // range is somewhere you have to lean to reach
-            const float n = (float)(delta - 5) / (kMaxDelta[p] - 5.0f);
+            const float n = (float)(delta - 5) / (kMaxDelta - 5.0f);
             target        = n > 1.0f ? 1.0f : n * n;
         }
     }
@@ -136,7 +143,7 @@ void Poll()
     const int sa = switch_a.Read();
     synth::Freeze(sa == Switch3::POS_UP);
     synth::Latch(sa == Switch3::POS_DOWN);
-    // S09/S10 up delay, centre the usual blend, down feedback
+    // S09/S10 up steps, centre the follower, down an LFO
     const int sb = switch_b.Read();
     voices::SetModMode(sb == Switch3::POS_UP      ? 0
                        : sb == Switch3::POS_DOWN ? 2

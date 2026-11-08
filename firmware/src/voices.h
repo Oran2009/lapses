@@ -37,8 +37,9 @@ void        SetModel(int m);
 int         Model_();
 const char* ModelName(int m);
 
-// S09/S10: what the mod follower moves. 0 delay (the echoes bend), 1 the
-// blend it has always been, 2 feedback (the loop rings longer).
+// S09/S10: what DRIVES the mod. 0 steps (jump and hold), 1 the follower it
+// has always been, 2 an LFO. Where it goes is fixed at the old centre's
+// blend. The follower stops when you do; the other two do not.
 void SetModMode(int m);
 int  ModMode();
 

@@ -68,29 +68,26 @@ constexpr Model kModel[kModels] = {
 int cur_model = 0;
 inline const Model& M() { return kModel[cur_model]; }
 
-// S09/S10 picks what the mod follower moves.
+// S09/S10 picks WHAT drives the mod. It used to pick where the mod went --
+// delay, the blend, feedback -- but those were one movement concentrated,
+// a difference of degree, and the switch went unreached for. The
+// destination is now always the blend that was its centre: all three move
+// together, each by its own scaling, which is the only routing that leaves
+// the resting sound alone (everything in the delay measured a press duck of
+// 0.95 against its 0.94 bound, everything in the drive 1.46 -- the wash
+// RISING on a press).
 //
-// Centre is the blend the instrument has always had: all three move together,
-// each by its own scaling. It is the resting position because concentrating
-// the mod changes the resting sound -- with everything in the delay the press
-// duck measured 0.95 against its 0.94 bound, and with everything in the drive
-// it went the wrong way entirely (1.46, the wash rising on a press).
-//
-// Up and down concentrate it into one dimension and boost it, so the movement
-// reads as pitch or as length instead of a little of each. Drive is not one
-// of the choices: the Link knob already drives every loop's distortion, and
-// two controls on one dimension is the redundancy the switch was meant to
-// avoid. Boosts measured as the swing of the value each mode owns, against
-// the same run in the other modes (baselines: delay 678 ms, feedback 0.375):
-// delay x6 reaches 1085 ms, feedback x3 reaches 1.225 against its 1.3 clamp.
+// The follower only moves because the loop moved, so it stops when you do.
+// The other two carry on without you, which is the whole point of them.
+// Each voice runs its own, at the rate WFC already chose for it, so they
+// never line up.
 enum
 {
-    kModDelay = 0,
-    kModBlend,
-    kModFb
+    kModStep = 0,   // up: jump and hold
+    kModFollow,     // centre: the instrument as it was
+    kModLfo         // down: a sine
 };
-int mod_mode = kModBlend;   // the switch at rest
-constexpr float kModBoost[3] = {6.0f, 1.0f, 3.0f};
+int mod_mode = kModFollow;   // the switch at rest
 
 float sr        = 48000.0f;
 float inv_sr    = 1.0f / 48000.0f;
@@ -320,6 +317,9 @@ struct Voice
     float    outg, outg_t;   // what this voice sends to the bus
     float    dryl, dryl_t;   // extra dry while it is the fresh one
     float    mod;   // its value this tick
+    uint32_t mod_ph;             // the LFO's phase
+    float    frate;              // and its rate, the one Delay does not set
+    float    step_t, step_left;  // where the step is going, and when next
 
     // What the loop's distortion put out last sample: the feedback path and
     // every cable tap read this, which is what breaks the algebraic loop
@@ -459,7 +459,7 @@ void Init(float sample_rate, int block_size)
     link_lp_c = 1.0f - expf(-2.0f * 3.14159265f * 2000.0f * inv_sr);
     // Init leaves the engine in a known state: both shells re-assert the
     // switch every poll, so this only matters to whoever calls Init next
-    mod_mode  = kModBlend;
+    mod_mode  = kModFollow;
     // 30 ms: the pool's level, not its waveform
     link_env_c = 1.0f - expf(-inv_sr / 0.03f);
     link_env   = 0.0f;
@@ -492,6 +492,12 @@ void Init(float sample_rate, int block_size)
         vo.pre = vo.pre_t = 1.0f;
         vo.mspeed = vo.mspeed_t = 0.5f;
         vo.fast = vo.slow = vo.lvl_sum = vo.out_lvl = vo.pk = 0.0f;
+        // Its own phase and its own first step, or seven voices sharing one
+        // movement is one voice as far as the ear is concerned
+        vo.frate     = 0.54f;
+        vo.mod_ph    = (uint32_t)(Rand() * 4294967296.0f);
+        vo.step_t    = Rnd();
+        vo.step_left = Rand() * 4.0f;
         vo.ds_p = vo.ds2_p = -1.0f;
         vo.dtile              = -1;
         vo.dly_jump           = false;
@@ -527,7 +533,7 @@ void Init(float sample_rate, int block_size)
 }
 
 // SPIKE: the voice worlds
-void SetModMode(int m) { mod_mode = m >= 0 && m <= kModFb ? m : kModBlend; }
+void SetModMode(int m) { mod_mode = m >= 0 && m <= kModLfo ? m : kModFollow; }
 int  ModMode() { return mod_mode; }
 
 void SetModel(int m)
@@ -752,11 +758,19 @@ void Control(float now, float dt)
         // The mod rides the envelope, so a silent voice's line is still
         const float dpe = wfc::DP[wfc::ModDepthOf(lo)] * modm * vo.amp;
         vo.mspeed_t      = mspeed0 * wfc::MS[wfc::ModSpeedOf(lo)];
-        const float dpb   = dpe * kModBoost[mod_mode];
-        const bool  blend = mod_mode == kModBlend;
-        vo.m_dly_t = blend || mod_mode == kModDelay ? dly * 0.08f * dpb : 0.0f;
-        vo.m_fb_t  = blend || mod_mode == kModFb ? 0.2f * dpb : 0.0f;
-        vo.m_pre_t = blend ? pre * 0.35f * dpb : 0.0f;
+        // The same rate class, but NOT through ModSpeed0, which is
+        // 1/(delay x 8). The follower keeps that link because its rate is a
+        // reaction time and every other thing the Delay knob sets is one
+        // too. An LFO reacts to nothing, so there the knob was setting a
+        // frequency instead -- 1.4 s a turn at one end against 24 s at the
+        // other, which is a tremolo and a tide wearing the same label.
+        // 0.54 Hz is ModSpeed0 at the Delay knob's own default, so the
+        // sound at that setting is the one that was already there.
+        constexpr float kFreeHz = 0.54f;
+        vo.frate         = kFreeHz * wfc::MS[wfc::ModSpeedOf(lo)];
+        vo.m_dly_t = dly * 0.08f * dpe;
+        vo.m_fb_t  = 0.2f * dpe;
+        vo.m_pre_t = pre * 0.35f * dpe;
         vo.depth_now = dpe;
 
         // A break is an event, a repair is a recovery, so they do not travel
@@ -798,12 +812,43 @@ void Control(float now, float dt)
         vo.out_lvl      = lvl;
         vo.lvl_sum      = 0.0f;
         vo.lvl_n        = 0;
-        const float tau = 0.4f / (vo.mspeed > 0.05f ? vo.mspeed : 0.05f);
+        const float msp = vo.mspeed > 0.05f ? vo.mspeed : 0.05f;
+        const float tau = 0.4f / msp;
         Approach(vo.fast, lvl, Coeff(tau, dt));
         Approach(vo.slow, lvl, Coeff(tau * 8.0f, dt));
-        // 45 is measured: at 14 this sat at an rms of 0.09 and read as
-        // nothing happening at all
-        vo.mod = Shape((vo.fast - vo.slow) * 45.0f);
+        if(mod_mode == kModFollow)
+        {
+            // 45 is measured: at 14 this sat at an rms of 0.09 and read as
+            // nothing happening at all
+            vo.mod = Shape((vo.fast - vo.slow) * 45.0f);
+        }
+        else if(mod_mode == kModLfo)
+        {
+            // The rate class as a frequency, geared down. Straight across it
+            // was 0.18 to 0.55 Hz -- the same order as the follower's own
+            // tau, which sounded right on paper and far too busy at full
+            // depth, where the swing is wide enough that the turn itself is
+            // the event. A third of that was still recognisable as an LFO
+            // within a few seconds, which is the thing to avoid. A tenth is
+            // 19 to 58 s a turn, an order of magnitude past the longest
+            // echo, so it reads as drift rather than as a wobble.
+            constexpr float kLfoGear = 0.1f;
+            vo.mod_ph += (uint32_t)(vo.frate * kLfoGear * dt * 4294967296.0f);
+            vo.mod = SinQ(vo.mod_ph);
+        }
+        else
+        {
+            vo.step_left -= dt;
+            if(vo.step_left <= 0.0f)
+            {
+                vo.step_left = (0.5f + Rand() * 1.5f) / vo.frate;
+                vo.step_t    = Rnd();
+            }
+            // A step straight into the feedback gain is a click. 30 ms is
+            // still heard as a jump, and the delay's share of it arrives as
+            // a scrub anyway: AdvanceTaps caps how fast the tap may travel.
+            Approach(vo.mod, vo.step_t, Coeff(0.03f, dt));
+        }
 
         // Where the voice is, drifting slowly
         vo.pan_ph += vo.pan_inc;

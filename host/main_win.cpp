@@ -303,7 +303,7 @@ Rect          sw_r[kSwitches][kSwMaxCells];
 int           sw_cell[kSwitches] = {0, 1, 1};
 
 const char* kSwLabel[kSwitches][kSwMaxCells]
-    = {{}, {"freeze", "--", "latch"}, {"delay", "blend", "feedback"}};
+    = {{}, {"freeze", "--", "latch"}, {"steps", "follow", "LFO"}};
 const char* kSwName[kSwitches]
     = {"voice model (V)", "S07/S08 (C)", "S09/S10 mod (T)"};
 

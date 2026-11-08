@@ -1551,6 +1551,116 @@ static void TestAPressDoesNotBreakItself()
     Check("a press is not read as a lean", broke == 0);
 }
 
+static void TestTheRestIsWhereYouPressed()
+{
+    printf("the break is a push past the press, not a fixed force\n");
+    // Both the board and the GUI call SetPressure for every pad on every
+    // poll, held or not. TestAPressDoesNotBreakItself never sends those
+    // idle zeroes, so it never saw that they consumed the reseed and left
+    // the resting force at 0: on the board a firm press broke its own
+    // voice, and leaning harder afterwards did nothing.
+    int       press = 0, push = 0;
+    const int kTries = 20;
+    for(int i = 0; i < kTries; i++)
+    {
+        float now = 0.0f;
+        synth::Init(kSr, 48);
+        wfc::Init(i + 1);
+        synth::SetKnob(6, 0.0f);   // Unrest off: it breaks things on its own
+        AdvanceSeconds(now, 1.0f);
+        synth::Freeze(true);       // and so does a scheduled heal
+        for(int b = 0; b < 20; b++)
+        {
+            synth::SetPressure(0, 0.0f);
+            AdvanceSeconds(now, 0.028f);
+        }
+        synth::TookBreak();
+        synth::Press(0);
+        // A firm press, well over kFloor, through the panel's own ramp
+        float       p    = 0.0f;
+        const float kMid = 0.5f;
+        for(int b = 0; b < 18; b++)
+        {
+            p += (kMid - p) * 0.5f;
+            synth::SetPressure(0, p);
+            AdvanceSeconds(now, 0.028f);
+        }
+        if(synth::TookBreak())
+            press++;
+        // Then lean, from where the finger already is
+        for(int b = 0; b < 18; b++)
+        {
+            p += (1.0f - p) * 0.5f;
+            synth::SetPressure(0, p);
+            AdvanceSeconds(now, 0.028f);
+        }
+        AdvanceSeconds(now, 0.5f);
+        if(synth::TookBreak())
+            push++;
+        synth::Freeze(false);
+        synth::Release(0);
+    }
+    printf("  %d of %d broke on the press, %d of %d on the push after\n",
+           press, kTries, push, kTries);
+    Check("a firm press is not itself a lean", press == 0);
+    Check("and pushing past it breaks straight away", push == kTries);
+
+    // A push is a lean AND a relax, so this does not test leaning further
+    // from an already-leaned-on pad: that gesture is not made, and making
+    // rest chase it would move the resting force up onto the leaned force,
+    // which is what the relax then cannot get back under. Measured, letting
+    // rest chase after a break cost two thirds of the leans at 4 Hz below.
+    // The gesture as actually played: lean, relax, lean again, over and
+    // over on one press. Each relax drops rest back, so this does not climb
+    // the range the way the stepped test above does.
+    const float kPeriod[] = {1.0f, 0.5f, 0.25f};
+    for(int t = 0; t < 3; t++)
+    {
+        int got = 0;
+        const int kCycles = 6;
+        for(int i = 0; i < kTries; i++)
+        {
+            float now = 0.0f;
+            synth::Init(kSr, 48);
+            wfc::Init(i + 1);
+            synth::SetKnob(6, 0.0f);
+            AdvanceSeconds(now, 1.0f);
+            synth::Freeze(true);
+            synth::Press(0);
+            float p = 0.0f;
+            for(int b = 0; b < 18; b++)   // settle on the resting force
+            {
+                p += (0.35f - p) * 0.5f;
+                synth::SetPressure(0, p);
+                AdvanceSeconds(now, 0.028f);
+            }
+            synth::TookBreak();
+            for(int c = 0; c < kCycles; c++)
+            {
+                const int half = (int)(kPeriod[t] * 0.5f / 0.028f);
+                for(int phase = 0; phase < 2; phase++)
+                {
+                    const float tgt = phase ? 0.35f : 0.75f;
+                    for(int b = 0; b < half; b++)
+                    {
+                        p += (tgt - p) * 0.5f;
+                        synth::SetPressure(0, p);
+                        AdvanceSeconds(now, 0.028f);
+                    }
+                }
+                if(synth::TookBreak())
+                    got++;
+            }
+            synth::Freeze(false);
+            synth::Release(0);
+        }
+        printf("  at %.0f ms a cycle: %d of %d leans broke\n",
+               kPeriod[t] * 1000.0f, got, kTries * kCycles);
+        Check("every lean of a lean-relax gesture breaks",
+              got == kTries * kCycles);
+    }
+}
+
 static void TestTheKnobDoesNotDragTheTap()
 {
     printf("turning Delay bends the tap, at a capped rate\n");
@@ -1901,61 +2011,65 @@ static void TestLinkMakesNewContent()
           share[1] > share[0] * 1.5);
 }
 
-// S09/S10 picks what the mod follower moves: the delay alone, the blend the
-// instrument has always had, or the feedback alone. The claim is that the
-// ends are different in kind -- pitch against length -- and that the centre
-// is still the blend. Checked as a matrix rather than against thresholds:
-// for each dimension, the mode that owns it must move it furthest.
-static void TestModModesMoveDifferentThings()
+// S09/S10 picks what DRIVES the mod. Measured with nothing pressed at all
+// and HOLD floating the voices, which is the case the switch exists for.
+//
+// It does NOT separate them into one that stops and two that do not: the
+// loops feed each other, so the ensemble never settles and the follower
+// always has something to follow. It parks only in the sense of moving
+// less. What does separate them is HOW they move, as the largest step the
+// value takes over its average step: a sine is pi/2 and nothing else, a
+// jump-and-hold is most of its range at once over a long flat average, and
+// the follower is between the two because the thing it follows is noisy.
+static void TestWhatDrivesTheMod()
 {
-    printf("each mod mode moves its own dimension and not the others\n");
-    // [mode][dimension]: 0 delay, 1 drive, 2 feedback
-    double sw[3][3] = {};
+    printf("the three mod sources move in three different ways\n");
+    double swing[3] = {}, jumpy[3] = {};
     for(int m = 0; m < 3; m++)
     {
         synth::Init(kSr, kBlock);
         wfc::Init(5);
-        K().mod = 1.0f;
+        K().mod    = 1.0f;
+        K().unrest = 0.0f;   // it moves things on its own
+        K().hold   = 1.0f;   // the drone, with no pad touched
         voices::SetModMode(m);
         float now = 1.0f;
-        for(int p = 0; p < 4; p++)
-            synth::Press(p);
-        AdvanceSeconds(now, 1.5f);
-        // Voice 1's pad is the one played below. The follower rides its own
-        // voice's level, so a pad held steady leaves it parked.
+        AdvanceSeconds(now, 8.0f);
+        synth::Freeze(true);   // and no scheduled heal either
         const int v = synth::PadVoice(1);
-        float     lo[3] = {9e9f, 9e9f, 9e9f}, hi[3] = {-9e9f, -9e9f, -9e9f};
-        for(int i = 0; i < 80; i++)
+        // 12 s covers several turns of the slowest LFO
+        double    lo = 9e9, hi = -9e9, dsum = 0.0, dmax = 0.0;
+        float     prev = voices::Mod(v);
+        const int kN   = 600;
+        for(int i = 0; i < kN; i++)
         {
-            if(i % 20 == 0)
-                synth::Release(1);
-            if(i % 20 == 10)
-                synth::Press(1);
-            AdvanceSeconds(now, 0.05f);
-            const float x[3]
-                = {voices::EffDly(v), voices::EffDrv(v), voices::EffFb(v)};
-            for(int d = 0; d < 3; d++)
-            {
-                if(x[d] < lo[d]) lo[d] = x[d];
-                if(x[d] > hi[d]) hi[d] = x[d];
-            }
+            AdvanceSeconds(now, 0.02f);
+            const float x = voices::Mod(v);
+            if(x < lo)
+                lo = x;
+            if(x > hi)
+                hi = x;
+            const double d = fabs(x - prev);
+            dsum += d;
+            if(d > dmax)
+                dmax = d;
+            prev = x;
         }
-        for(int d = 0; d < 3; d++)
-            sw[m][d] = hi[d] - lo[d];
-        printf("  %-8s dly %6.1f ms   drv %5.2f   fb %.3f\n",
-               m == 0 ? "delay" : (m == 1 ? "blend" : "feedback"),
-               sw[m][0] * 1000.0, sw[m][1], sw[m][2]);
-        for(int p = 0; p < 4; p++)
-            synth::Release(p);
+        swing[m] = hi - lo;
+        jumpy[m] = dsum > 0.0 ? dmax / (dsum / (double)kN) : 0.0;
+        printf("  %-7s swing %.3f   largest move over average %.1f\n",
+               m == 0 ? "steps" : (m == 1 ? "follow" : "LFO"), swing[m],
+               jumpy[m]);
+        synth::Freeze(false);
     }
-    K().mod = 0.5f;
+    K().mod    = 0.5f;
+    K().unrest = 0.2f;
+    K().hold   = 0.0f;
     voices::SetModMode(1);
-    Check("delay mode moves the delay furthest",
-          sw[0][0] > sw[1][0] && sw[0][0] > sw[2][0]);
-    Check("only the blend moves the drive at all",
-          sw[1][1] > sw[0][1] && sw[1][1] > sw[2][1]);
-    Check("feedback mode moves the feedback furthest",
-          sw[2][2] > sw[0][2] && sw[2][2] > sw[1][2]);
+    for(int m = 0; m < 3; m++)
+        Check("every source keeps moving with nothing played", swing[m] > 0.5);
+    Check("a step is a jump and the follower is not", jumpy[0] > jumpy[1] * 4.0);
+    Check("and the follower is not a sine either", jumpy[1] > jumpy[2] * 1.5);
 }
 
 // S36, on the instrument rather than on a tone: the fader has to outlive the
@@ -2081,6 +2195,70 @@ static void MeanLoad(float& now, float secs, double* out)
 
 
 
+// The Delay knob is the instrument's tempo: echo length, glide, release,
+// the follower's reaction time. An attack is not one of those -- it answers
+// nothing, it IS the press -- and tied to the knob it reached 0.95 s at the
+// top, where the lift that announces a press is long spent before the note
+// has arrived. So the attack is now flat across the knob and the release is
+// deliberately not, which is the asymmetry this pins.
+//
+// Last in the suite: it runs four settled ensembles, and every Rand() it
+// draws shifts the draws of whatever follows.
+static void TestAttackIsFlatAndReleaseIsNot()
+{
+    printf("the Delay knob sets the release but not the attack\n");
+    const float kDly[] = {0.0f, 0.3f, 0.6f, 1.0f};
+    int         t90[4] = {}, t10[4] = {};
+    for(int di = 0; di < 4; di++)
+    {
+        synth::Init(kSr, kBlock);
+        wfc::Init(5);
+        K().delay  = kDly[di];
+        K().unrest = 0.0f;   // it moves things on its own
+        float now  = 1.0f;
+        for(int p = 0; p < 4; p++)
+            synth::Press(p);
+        AdvanceSeconds(now, 6.0f);
+        synth::Freeze(true);
+        const int v = synth::PadVoice(5);
+        synth::Press(5);
+        // 3 s up, then 8 s down: the slowest release is nearly 6 s
+        float up[300] = {}, dn[800] = {};
+        for(int i = 0; i < 300; i++)
+        {
+            AdvanceSeconds(now, 0.01f);
+            up[i] = voices::Amp(v);
+        }
+        synth::Release(5);
+        for(int i = 0; i < 800; i++)
+        {
+            AdvanceSeconds(now, 0.01f);
+            dn[i] = voices::Amp(v);
+        }
+        const float top = up[299];
+        t90[di] = t10[di] = -1;
+        for(int i = 0; i < 300; i++)
+            if(t90[di] < 0 && up[i] >= top * 0.9f)
+                t90[di] = i * 10;
+        for(int i = 0; i < 800; i++)
+            if(t10[di] < 0 && dn[i] <= top * 0.1f)
+                t10[di] = i * 10;
+        printf("  delay %.1f: up to 90%% in %d ms, down to 10%% in %d ms\n",
+               kDly[di], t90[di], t10[di]);
+        synth::Freeze(false);
+        for(int p = 0; p < 6; p++)
+            synth::Release(p);
+    }
+    K().delay  = 0.6f;
+    K().unrest = 0.2f;
+    for(int di = 1; di < 4; di++)
+        Check("the attack is the same wherever Delay is",
+              t90[di] == t90[0] && t90[0] > 0);
+    // The control: the same run, the same measurement, on the one the knob
+    // is still meant to set
+    Check("and the release is not", t10[3] > t10[0] * 4);
+}
+
 constexpr int kBridgeBlocks = 400;
 
 
@@ -2134,7 +2312,7 @@ int SelfTest()
     TestTheLedSeesBreaks();
     TestLeaningOnAPadBreaksIt();
     TestEveryVoiceIsTunedBeforeItIsPlayed();
-    TestModModesMoveDifferentThings();
+    TestWhatDrivesTheMod();
     TestLinkMakesNewContent();
     TestLatchKeepsThePadsDown();
     TestLinkRingsTheUntouchedVoices();
@@ -2142,7 +2320,9 @@ int SelfTest()
     TestShimmerClimbsTheTail();
     TestHoldWakesTheChain();
     TestAPressDoesNotBreakItself();
+    TestTheRestIsWhereYouPressed();
     TestTheKnobDoesNotDragTheTap();
+    TestAttackIsFlatAndReleaseIsNot();
 
     if(fails)
         printf("\n%d FAILED\n", fails);

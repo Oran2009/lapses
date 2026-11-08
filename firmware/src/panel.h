@@ -9,7 +9,7 @@
 //         breaks its group -- see synth::SetPressure
 // Knobs:  S30..S35 on ADC 0..5, faders S36/S37 on ADC 6,7
 // Switch: S07/S08 up freezes the solver, down latches the pads
-//         S09/S10 picks what the mod moves: delay, the usual blend, feedback
+//         S09/S10 picks what drives the mod: steps, the follower, an LFO
 // Spare:  P01
 //
 // The engine is not reentrant and a solve is most of an audio block, so the
