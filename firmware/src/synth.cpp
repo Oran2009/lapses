@@ -21,8 +21,28 @@ namespace
 // voices all sound at once now, and at 220 Hz a critical band is only 48 Hz
 // wide, so a close scale would simply mud up. The tightest neighbouring
 // pair here is 220/264, which is what the instrument already had.
-const int kRatN[kPads] = {1, 6, 3, 2, 12, 3, 4};
-const int kRatD[kPads] = {1, 5, 2, 1, 5, 1, 1};
+// P01 steps through these. Each is a chord spread over two octaves rather
+// than a scale packed into one, for the reason above: seven voices sound at
+// once, so neighbouring pads that sit inside one critical band only mud up.
+// Measured in ERBs rather than semitones, because a critical band widens
+// with frequency: the harmonic row's 770/880 is a mere 8/7, but up there
+// that is 1.02 bands against the shipped minor's 0.91 at 220/264. Every row
+// below is therefore roomier than what the instrument already played.
+// Fourths is the odd one at three octaves -- it has no third to place, so
+// spreading it costs nothing.
+const uint8_t kRatN[kScales][kPads] = {
+    {1, 6, 3, 2, 12, 3, 4},    // just minor triad, what it has always played
+    {1, 5, 3, 2, 5, 3, 4},     // the same shape, major
+    {1, 3, 2, 5, 3, 7, 4},     // harmonics 2..8 of a 110 Hz fundamental
+    {1, 4, 2, 8, 4, 16, 8},    // stacked fourths, no third at all
+};
+const uint8_t kRatD[kScales][kPads] = {
+    {1, 5, 2, 1, 5, 1, 1},
+    {1, 4, 2, 1, 2, 1, 1},
+    {1, 2, 1, 2, 1, 2, 1},
+    {1, 3, 1, 3, 1, 3, 1},
+};
+int scale = 0;
 constexpr int kRoot = 9;   // A
 
 // Leaning on a held pad breaks its group's rules. A lean is an INCREASE,
@@ -290,6 +310,7 @@ void Init(float sample_rate, int block_size)
     send_hp_c = 1.0f - expf(-2.0f * 3.14159265f * 180.0f / sr);
     lim_env = 0.0f;
 
+    scale = 0;
     wfc::Init(0x5afe6a7du);
     voices::Init(sample_rate, block_size);
 
@@ -311,7 +332,7 @@ float PadHz(int p)
 {
     if(PadActive(p) && pad_hz[p] > 0.0f)
         return pad_hz[p];
-    return RootHz() * (float)kRatN[p] / (float)kRatD[p];
+    return RootHz() * (float)kRatN[scale][p] / (float)kRatD[scale][p];
 }
 
 int  PadVoice(int p) { return kPadVoice[p]; }
@@ -408,7 +429,7 @@ void Press(int pad)
     if(held[pad])
         return;
     held[pad]   = true;
-    pad_hz[pad] = RootHz() * (float)kRatN[pad] / (float)kRatD[pad];
+    pad_hz[pad] = RootHz() * (float)kRatN[scale][pad] / (float)kRatD[scale][pad];
     const int v = kPadVoice[pad];
     if(v < 0)
     {
@@ -460,6 +481,18 @@ bool ShiftOctave(int delta)
 }
 
 int Octave() { return octave; }
+
+// A new scale applies to the next press only: PadHz hands an active pad the
+// pitch it was triggered with, so a drone survives the change the same way
+// it survives an octave shift.
+void NextScale() { scale = (scale + 1) % kScales; }
+int  Scale() { return scale; }
+const char* ScaleName()
+{
+    static const char* const kName[kScales]
+        = {"minor", "major", "harmonic", "fourths"};
+    return kName[scale];
+}
 
 bool ShiftGain(int delta)
 {

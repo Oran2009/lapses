@@ -5,3 +5,5 @@ build/
 *.map
 *.obj
 *.o
+video/
+host/

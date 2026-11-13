@@ -34,6 +34,13 @@ float PressureRest(int pad);
 bool ShiftOctave(int delta);
 int  Octave();
 
+// P01 steps through the tunings. A change lands on the next press: pads
+// already sounding keep the pitch they were triggered with.
+constexpr int kScales = 4;
+void        NextScale();
+int         Scale();
+const char* ScaleName();
+
 constexpr int kKnobs = 10;   // HANDOFF 4.2's six, plus Unrest, Hold, Link, Shimmer
 
 // 0..1 each. Rebuilds the rules and schedules the debounced heal.

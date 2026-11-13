@@ -15,6 +15,7 @@ namespace
 constexpr int kAnalog   = 8;
 constexpr int kFirstPad = 3;   // P03..P09 play
 constexpr int kOctDown = 0, kOctUp = 2;     // P00, P02
+constexpr int kScalePad = 1;                // P01
 constexpr int kVolDown = 10, kVolUp = 11;   // P10, P11
 
 AnalogControl analog[kAnalog];
@@ -161,6 +162,11 @@ void Poll()
                 synth::Press(i - kFirstPad);
             else
                 synth::Release(i - kFirstPad);
+        }
+        else if(down && i == kScalePad)
+        {
+            synth::NextScale();
+            blink = 1;
         }
         else if(down && (i == kOctDown || i == kOctUp))
             blink = synth::ShiftOctave(i == kOctUp ? 1 : -1) ? 1 : 2;
