@@ -38,20 +38,11 @@ inline float Smooth(float a, float b, float x)
 
 Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f, 0.0f, 0.0f};
 bool   frozen = false;
-// How a wave travels: the gap between one voice changing and the next, and,
-// past kSpread, whether it carries into the other group. It had a fader of
-// its own and did not earn it -- the difference is not audible unless you
-// are listening for it -- so it is pinned, below kSpread, which leaves the
-// two groups as separate as they were. Off the Delay knob either way.
-// Pinned. 0.35 was a guess and it cost the breaks their legibility: at a
-// 0.29 s hop the wave takes 1.8 s to cross seven voices, so the victim can
-// change two seconds after the LED. Measured over the first 0.4 s after a
-// break, an echo moves the mix 1.3% at 0.35 and 4.8% at 0.02; the whole
-// wave still takes 0.25 s, which reads as a cascade rather than a click.
+// Gap between one voice changing and the next. 0.35 let the victim change 2 s
+// after the LED; 0.02 puts the whole wave in 0.25 s and reads as a cascade.
 float  ripple = 0.02f;
-// What each voice is actually putting out, pushed in from the audio side
-// once a block. wfc cannot ask voices directly -- voices is the layer above
-// -- and a break needs it to avoid landing on something inaudible.
+// Per-voice output level, pushed in from the audio side once a block: wfc
+// cannot call up into voices, and a break must not land on an inaudible one.
 float  level[kVoices] = {};
 Limits limits = {};
 
@@ -59,9 +50,8 @@ Limits limits = {};
 // which (pair rules 1 to 3), and which a voice may hold at all (rule 1)
 uint8_t compat[kDelays * kDelays];
 uint8_t self_ok[kTiles];
-// 10,000 pairs, so the tables are rebuilt when something is about to read
-// them rather than every time a knob twitches. A knob moves at the block
-// rate; a solve runs a few times a second.
+// 10,000 pairs, so the tables rebuild lazily on read, not on every knob
+// twitch: knobs move at the block rate, solves a few times a second.
 bool tables_dirty = true;
 void EnsureTables();
 
@@ -74,11 +64,10 @@ int32_t seq_tile[kVoices], seq_mod[kVoices], seq_skew[kVoices];
 int32_t seq = 0;
 
 bool  sounding[kVoices];
-float started_at[kVoices];
+double started_at[kVoices];
 int   flash[kVoices];
-// Set when a break is DELIVERED, not when it is scheduled: the LED stutters
-// at the moment the sound changes. Separate from flash[], which voices::
-// Control consumes for the gesture.
+// Set when a break is DELIVERED, not scheduled, so the LED tracks the sound.
+// Separate from flash[], which voices::Control consumes.
 bool  broke = false;
 
 // A change the wave carries. -1 means the field is not part of it.
@@ -90,28 +79,26 @@ inline Change NoChange() { return Change{-1, -1, -1}; }
 
 struct Event
 {
-    float   t;
+    double  t;
     int     v;
     int32_t seq;
     int     kind;   // 2 = break, 1 = repair
     Change  ch;
 };
-// ponytail: a fixed queue. Worst case per group in one Tick is 12 events (heal,
-// lapse, unrest and a chained break, 3 voices each), but knob_settle can Heal
-// each group twice and earlier ticks' events carry over: measured about 30 plus
-// carry. 48 holds that; recount if a Tick starts scheduling more.
+// ponytail: fixed queue. Measured about 30 events plus carry in one Tick;
+// 48 holds it. Recount if a Tick starts scheduling more.
 constexpr int kMaxEvents = 48;
 Event         events[kMaxEvents];
 int           n_events = 0, n_dropped = 0;
 
-float heal_at[kGroups], next_lapse[kGroups], next_unrest[kGroups];
+double heal_at[kGroups], next_lapse[kGroups], next_unrest[kGroups];
 
 bool  joined      = false;
 float solve_fm    = -1.0f;
 float table_fm    = -1.0f;
 // Duck, six voices, default knobs, P05 down vs up: 0.69x load at Unrest 0, 0.58x at 0.3
 constexpr float kChargeGain = 4.0f;
-float knob_settle = 0;
+double knob_settle = 0;
 
 // ------------------------------------------------------------- the sounding
 
@@ -124,10 +111,8 @@ int Active(int* act, int group)
     return n;
 }
 
-// What the rules read in place of FbMul() for a group: its own feedback
-// inflated by the louder group's shown load. The audio never sees it. Writes
-// nothing, so Diagnose can call it from the window thread; its reads of shown
-// state are unsynchronised on purpose, a torn one costs a frame of diagnostic.
+// What the rules read in place of FbMul(); the audio never sees it. Writes
+// nothing, so the window thread may call it -- a torn read costs one frame.
 float ChargedFb(int group)
 {
     const float fm = FbMul();
@@ -151,17 +136,15 @@ float ChargedFb(int group)
     return fmaxf(fm, fminf(fm * (1.0f + kChargeGain * load / kGroupSize), cap));
 }
 
-// A voice's delay as a multiple of the base time, skew included. The rule
-// reads this rather than the class alone, so a skewed voice is judged by the
-// time it actually echoes at.
+// Delay as a multiple of the base time, skew included, so a skewed voice is
+// judged by the time it actually echoes at.
 float ShownDly(int v)
 {
     return DR[TileD(shown_tile[v])] * (shown_skew[v] ? kSkew : 1.0f);
 }
 
-// The ensemble budgets, floored at the matching per-voice limit so a single
-// sounding voice is governed by its own rule and nothing stricter. At two
-// voices these are exactly the pair sums they replaced.
+// Ensemble budgets, floored at the per-voice limit so one voice is governed
+// by its own rule. At two voices they equal the pair sums they replaced.
 float FbBudget(int n)
 {
     return fmaxf(limits.Fself, limits.Fshare * (float)n);
@@ -265,16 +248,8 @@ float TileDist(int a, int b)
            + fabsf((float)(TileD(a) - TileD(b))) * 0.3f;
 }
 
-// The line layer. Pin the re-rolled voice (fixed_v, or -1 for none), then
-// settle the other sounding voices in `order`, each keeping its own tile if
-// that is still legal. out[] is filled for the nodes, -1 for a voice whose
-// tile is to be left alone.
-//
-// Returns how many voices were left alone: 0 for a full settle, -1 when not
-// even arc-consistency holds. A state can be unsatisfiable (Delay at minimum
-// fits only 3 voices under rule 3), and settling what it can beats painting
-// everything with the default tile. Pass must keep rolling for a 0: a partial
-// is often the pinned tile's fault, not the state's.
+// Pin fixed_v (-1 for none), settle the rest. Returns voices left alone: 0 a
+// full settle, -1 no arc consistency. Unsatisfiable states get a partial.
 int Repair(const int* nodes, int n, const int* order, int fixed_v,
            int fixed_t, int* out)
 {
@@ -297,22 +272,18 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
         for(int v = 0; v < kVoices; v++)
             out[v] = -1;
         int skipped = 0;
-        // The ensemble budgets, spent as voices are placed. Each candidate
-        // must leave room for every voice not yet placed to sit at the floor,
-        // so greedy collapse can never dead-end on the budget.
+        // Budgets spent as voices are placed; a candidate must leave every
+        // unplaced voice room at the floor, so greedy cannot dead-end.
         const float fmul = solve_fm, dmul = DrvMul();
-        // Spent against a slightly smaller budget than Diagnose checks: the
-        // feedback charge is frozen for the solve but rises with the load the
-        // solve itself creates, so a solve filled to the brim reads as broken
-        // the moment it lands. 5% covers the charge's step at seven voices.
+        // 5% under what Diagnose checks: the charge is frozen for the solve
+        // but rises with the load it creates, so a full solve lands broken.
         float       fleft = FbBudget(n) * 0.95f, dleft = DrBudget(n);
         if(fixed_v >= 0)
         {
             fleft -= FL[TileF(fixed_t)] * fmul;
             dleft -= RL[TileR(fixed_t)] * dmul;
-            // A pinned tile that eats the whole budget is the pinned tile's
-            // fault, so say so and let the caller roll a different one rather
-            // than settle everyone else around it and still be broken.
+            // A pinned tile that eats the budget is the pin's fault: fail so
+            // the caller rolls another, not settle around it and still break.
             const float floor_n = (float)(n - 1);
             if(fleft < FL[0] * fmul * floor_n
                || dleft < RL[0] * dmul * floor_n)
@@ -332,9 +303,8 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
                     rest++;
             const float fhold = FL[0] * fmul * (float)rest,
                         dhold = RL[0] * dmul * (float)rest;
-            // Candidates, cheapest first. The tile it already has wins
-            // outright; the rest are ranked by distance plus a little jitter,
-            // which is what keeps repeated repairs from being identical.
+            // Cheapest first: the current tile wins outright, the rest rank
+            // by distance plus jitter, so repeated repairs differ.
             const int cur = tile[node];
             int       cand[kTiles];
             float     cost[kTiles];
@@ -377,10 +347,8 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
                 else
                     memcpy(dom, snap, sizeof(dom));
             }
-            // Nothing legal for this voice: leave out[node] at -1 so it keeps
-            // the tile it has, and carry on settling the others. It still
-            // spends what that tile costs, or the voices after it would be
-            // handed budget this one is already using.
+            // Nothing legal: keep the tile, settle the rest. Still spends
+            // what that tile costs, or later voices get budget it is using.
             if(!done)
             {
                 skipped++;
@@ -413,10 +381,10 @@ bool RepairMod(const int* act, int n, int fixed_v, int fixed_opt,
 // A REPLAY, not propagation: the solver already finished in one pass. Order
 // is by recency. Do not turn this into a real propagating ripple.
 int ApplyWave(const Change* ch, const int* order, int n, int kind,
-              float offset, float now)
+              float offset, double now)
 {
     const float iv = HopSeconds();
-    const float t0 = now + offset;
+    const double t0 = now + offset;
     seq++;
     int changed = 0;
     for(int h = 0; h < n; h++)
@@ -470,10 +438,8 @@ int RandomTile()
 
 int RandomModOpt()
 {
-    // The knob asks for depth; rule 5 decides how much of it is allowed. The
-    // request used to ignore the knob entirely, so turning the mod up only
-    // made the deep options illegal and the solver answered with depth 0 --
-    // the knob did the opposite of what it says.
+    // The knob asks for depth, rule 5 allows it. Ignoring the knob here made
+    // turning mod up outlaw the deep options and answer with depth 0.
     const float want  = knob.mod * 3.0f;
     int         depth = (int)(want * (0.4f + 0.8f * Rand()) + 0.5f);
     depth             = depth < 0 ? 0 : (depth > 3 ? 3 : depth);
@@ -514,16 +480,8 @@ float Ripple() { return ripple; }
 // The release outlasts the attack by more than the prototype had it: the
 // voices were cutting off before their own echoes.
 float ReleaseT() { return Clamp(DelayBase() * 6.5f, 0.45f, 6.5f); }
-// NOT tied to the delay, though the release still is. Every other thing the
-// Delay knob sets is how long something takes to answer something else, and
-// a long echo earning a long release is that: the loop is still fed while it
-// rings. An attack answers nothing -- it is the press itself. Tied to the
-// knob it reached 0.95 s at the top, where a voice was 35% up at 150 ms and
-// still climbing at 700 ms, by which time the lift that announces a press
-// (kFreshT, squared) is spent: the note arrived after its own announcement.
-// 0.243 s is exactly what the link gave at the Delay knob's own default,
-// so the setting most played is bit-for-bit unchanged and only the long
-// end moves.
+// Not tied to Delay, though release is: tied, it hit 0.95 s at the top and
+// the note arrived late. 0.243 is what the link gave at the default knob.
 float AttackT() { return 0.243f; }
 float ModSpeed0() { return Clamp(1.0f / (DelayBase() * 8.0f), 0.08f, 2.5f); }
 float FbMul() { return Lerp(0.5f, 1.5f, knob.fb); }
@@ -533,13 +491,8 @@ float DrvMul() { return Lerp(0.4f, 1.6f, knob.drive); }
 float ModMul() { return Lerp(0.0f, 4.0f, knob.mod); }
 float LoopCut() { return 300.0f * powf(24.0f, knob.filter); }
 float VoiceCutMul() { return Lerp(1.5f, 14.0f, knob.filter); }
-// Unrest used to ride on strictness, which made strict-but-restless and
-// loose-but-still unreachable. Its own control, so Control says how firmly
-// the rules hold and Unrest says how often the instrument moves by itself.
-// Control and Unrest ride one fader, tied in the SAME direction: the old
-// coupling ran them inversely, which is what made strict-but-restless and
-// loose-but-still unreachable. Those are now the two ends. Unrest lags over
-// the bottom third so there is still a tight-but-settled region.
+// ponytail: dead code, nothing calls this. Control and Unrest ride one fader
+// in the SAME direction; the old inverse coupling locked out two corners.
 void SetAgitation(float a)
 {
     knob.safe   = Clamp(a, 0.0f, 1.0f);
@@ -560,15 +513,13 @@ const char* BreakName(BreakType t)
 void RebuildRules()
 {
     const float s   = knob.safe;
-    // Halved from the old pair sums so two sounding voices behave exactly as
-    // they did; above two, the budget grows with the ensemble instead of
-    // pinning every extra voice to the floor.
+    // Halved from the old pair sums, so two voices behave as before and above
+    // two the budget grows with the ensemble.
     limits.Fshare   = (3.2f - 2.0f * s) * 0.5f;
     limits.Dshare   = (3.0f - 1.8f * s) * 0.5f;
     limits.Fself    = s > 0.6f ? 0.95f : 9.0f;
-    // Drive's own ceiling, the twin of Fself. Without it the top drive class
-    // sits under any ensemble budget on its own, so a fuzz break had nothing
-    // to violate once the pair rule went.
+    // Drive's ceiling, twin of Fself: without it the top drive class sits
+    // under any ensemble budget alone and a fuzz break violates nothing.
     limits.Rself    = s > 0.6f ? 0.7f : 9.0f;
     limits.ratio_on = s > 0.3f;
     limits.Lpeak    = s > 0.6f ? 0.98f : (s > 0.3f ? 1.2f : 9.0f);
@@ -592,23 +543,14 @@ void EnsureTables()
                              && RL[TileR(t)] * dm <= limits.Rself
                          ? 1
                          : 0;
-    // Only the echo rule is left here, and it reads nothing but the delay
-    // class, so the table is one entry per PAIR OF CLASSES rather than per
-    // pair of tiles: 49 instead of 19,600, on a path arc consistency walks
-    // thousands of times per solve. Feedback and drive are ensemble budgets
-    // now, spent down as voices collapse, because a budget is n-ary and arc
-    // consistency over pairs is blind to it.
+    // One entry per pair of CLASSES, not tiles: 49 instead of 19,600 on a path
+    // walked thousands of times a solve. Fb and drive are n-ary budgets.
     for(int a = 0; a < kDelays; a++)
         for(int b = 0; b < kDelays; b++)
         {
             bool ok = true;
-            // Echoes are either the same echo or two you can tell apart --
-            // a near miss is the mud. DR is a 1/6 grid, so every pair is
-            // already rhythmically related and only audibility is left to
-            // check; demanding a SIMPLE ratio of every pair was the old
-            // four-voice encoding and no set of more than four can satisfy
-            // it. This is why turning Delay down with several voices
-            // sounding causes echo breaks.
+            // Either the same echo or two you can tell apart; a near miss is
+            // mud. Audibility only: the 1/6 grid already relates every pair.
             if(ok && limits.ratio_on)
             {
                 const float d = fabsf(DR[a] - DR[b]);
@@ -623,10 +565,8 @@ void EnsureTables()
 
 void Init(uint32_t seed)
 {
-    // xorshift32 from a small seed returns small numbers for its first few
-    // rounds, which biased every early roll towards list[0]: measured over
-    // 400 seeds, drive classes 2 and 3 came up once between them. Scatter the
-    // seed and warm the state before anything draws from it.
+    // xorshift32 returns small numbers for its first rounds from a small
+    // seed: over 400 seeds, drive classes 2 and 3 came up once between them.
     rng_state = (seed ? seed : 1) * 2654435761u | 1u;
     for(int i = 0; i < 16; i++)
         Next();
@@ -653,14 +593,14 @@ void Init(uint32_t seed)
     RebuildRules();
 }
 
-void SetSounding(int v, bool on, float now)
+void SetSounding(int v, bool on, double now)
 {
     sounding[v] = on;
     if(on)
         started_at[v] = now;
 }
 
-void SetJoined(bool on, float now)
+void SetJoined(bool on, double now)
 {
     if(on == joined)
         return;
@@ -670,7 +610,7 @@ void SetJoined(bool on, float now)
         heal_at[g] = now;
 }
 bool  Sounding(int v) { return sounding[v]; }
-float StartedAt(int v) { return started_at[v]; }
+double StartedAt(int v) { return started_at[v]; }
 
 int EventsDropped() { return n_dropped; }
 int Tile(int v) { return tile[v]; }
@@ -689,7 +629,7 @@ int TakeFlash(int v)
 
 // ----------------------------------------------------------------- the work
 
-void Pass(int v, float now)
+void Pass(int v, double now)
 {
     const int g = GroupOf(v);
     SetSolveGroup(g);
@@ -753,11 +693,9 @@ void Pass(int v, float now)
         BreakRule(-1, g, (float)(no + 1) * HopSeconds(), now);
 }
 
-// Letting go is a gesture too. A released voice keeps ringing on its own
-// tile, so give it a fresh one: the tail then fades with a different colour
-// than the note sounded with. Delivered as a break (kind 2) so the delay
-// crawls to it and the release scrubs.
-void RerollTail(int v, float now)
+// Letting go is a gesture: a fresh tile, so the tail fades a different
+// colour. Delivered as a break so the delay crawls and the release scrubs.
+void RerollTail(int v, double now)
 {
     if(v < 0 || v >= kVoices)
         return;
@@ -777,7 +715,7 @@ void RerollTail(int v, float now)
     ApplyWave(ch, order, 1, 2, 0.0f, now);
 }
 
-void Heal(int g, float now)
+void Heal(int g, double now)
 {
     if(g < 0 || g >= kGroups)
         return;
@@ -814,22 +752,21 @@ void Heal(int g, float now)
     {
         const int m = order[i];
         ch[m].skew  = 0;
-        // -1 leaves the tile alone, which is also what a total failure now
-        // does: painting every voice with the default tile was the collapse
-        // this repair exists to avoid.
+        // -1 leaves the tile alone, and so does total failure: painting every
+        // voice default was the collapse this repair exists to avoid.
         ch[m].tile = have_line ? line[m] : -1;
         ch[m].mod  = have_mod ? md[m] : 0;
     }
     ApplyWave(ch, order, n, 1, 0.0f, now);
 }
 
-void Heal(float now)
+void Heal(double now)
 {
     for(int g = 0; g < kGroups; g++)
         Heal(g, now);
 }
 
-void BreakRule(int type, int g, float offset, float now, int prefer)
+void BreakRule(int type, int g, float offset, double now, int prefer)
 {
     if(g < 0 || g >= kGroups)
         return;
@@ -845,14 +782,8 @@ void BreakRule(int type, int g, float offset, float now, int prefer)
     memcpy(order, act, sizeof(int) * n);
     Recency(order, n);
 
-    // Whoever asked for the break names the voice it should land on -- a
-    // leaned-on pad breaks itself. Failing that, weight the choice by how
-    // loudly each voice is actually sounding: measured over 8 seeds, a flat
-    // random pick left the weakest break changing nothing audible at all,
-    // because it landed on a voice that was barely there.
-    // ONE draw, reused as both the flat index and the weighted position:
-    // an extra Rand() here shifts the whole stream, which moved every
-    // measured number by 40% and made before-and-after meaningless.
+    // The caller may name the voice -- a leaned-on pad breaks itself. Else
+    // weighted by loudness; a flat pick hit voices barely there. ONE draw.
     const float u = Rand();
     int         a = act[(int)(u * (float)n) % n];
     if(prefer >= 0 && InList(act, n, prefer))
@@ -910,10 +841,8 @@ void BreakRule(int type, int g, float offset, float now, int prefer)
                     = MkTile(TileD(tb), TileF(tb) < 2 ? TileF(tb) : 2, 3);
             break;
     }
-    // A break that lands on the tile the voice already holds changes
-    // nothing and is never delivered -- kFuzz on a tile that is already
-    // driven, kSwell on one already ringing. The player leans on the pad
-    // and hears silence, so force a real move instead.
+    // A break onto the tile the voice already holds is never delivered, so
+    // the player leans and hears nothing. Force a real move.
     if(ApplyWave(ch, order, n, 2, offset, now) == 0)
     {
         for(int i = 0; i < kVoices; i++)
@@ -927,10 +856,8 @@ void BreakRule(int type, int g, float offset, float now, int prefer)
     // WFC comes back for it, but not straight away
     heal_at[g] = now + offset + 3.0f + Rand() * 4.0f;
 
-    // Past half way the fader carries the break into the other group, one
-    // wave later, so the whole instrument chain-reacts instead of one
-    // cluster twitching. The guard stops the two groups breaking each
-    // other round and round.
+    // Past half way the break carries into the other group a wave later, so
+    // the whole instrument chain-reacts. The guard stops a feedback loop.
     static bool spreading = false;
     if(ripple >= kSpread && !spreading && kGroups > 1)
     {
@@ -941,19 +868,19 @@ void BreakRule(int type, int g, float offset, float now, int prefer)
     }
 }
 
-void BreakRule(int type, float offset, float now)
+void BreakRule(int type, float offset, double now)
 {
     for(int g = 0; g < kGroups; g++)
         BreakRule(type, g, offset, now, -1);
 }
 
-void KnobsMoved(float now)
+void KnobsMoved(double now)
 {
     // The player hears the strain, then the repair
     knob_settle = now + 0.35f;
 }
 
-void Tick(float now)
+void Tick(double now)
 {
     // Deliver what is due. An older event never overwrites a newer one.
     int keep = 0;

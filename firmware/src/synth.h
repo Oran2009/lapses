@@ -1,8 +1,5 @@
-// THE INSTRUMENT
-//
-// Pads, octave, voice allocation, the six knobs, and the master chain.
-// Portable: the Daisy shell (main.cpp) and the desktop shell (host/) both
-// drive this and add nothing of their own.
+// Pads, octave, scale, voice allocation, the knobs and the master chain.
+// Both shells drive this and add nothing of their own.
 
 #pragma once
 
@@ -49,11 +46,10 @@ float Knob(int i);
 const char* KnobName(int i);
 
 // Advance the control side. Call once per audio block.
-void Control(float now);
+void Control(double now);
 
-// One block, replacing whatever is in the buffers. `in` is the line input,
-// mono, or null when the shell has none: a signal on it turns the instrument
-// into an effects box, detected rather than switched.
+// One block, replacing the buffers. `in` is the mono line input or null; a
+// signal on it makes the instrument an effects box, detected not switched.
 void Process(float* l, float* r, int n, const float* in = nullptr);
 
 // 0..1: how far the line input has taken over from the partials

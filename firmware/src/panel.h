@@ -1,20 +1,6 @@
-// THE TOUCH 2 PANEL
-//
-// The hardware half of the old project's src/panel/touch2.cpp, with its
-// engine half dropped. The MPR121 register settings are the ones that were
-// tuned against the real board -- libDaisy's defaults miss presses.
-//
-// Pads:   P03..P09 play, P00/P02 octave down/up, P10/P11 volume down/up
-//         A playing pad also reports contact force, and leaning on one
-//         breaks its group -- see synth::SetPressure
-// Knobs:  S30..S35 on ADC 0..5, faders S36/S37 on ADC 6,7
-// Switch: S07/S08 up freezes the solver, down latches the pads
-//         S09/S10 picks what drives the mod: steps, the follower, an LFO
-// Spare:  P01
-//
-// The engine is not reentrant and a solve is most of an audio block, so the
-// whole control side -- this and synth::Control -- runs in the main loop.
-// The audio callback only renders.
+// P03..P09 play and report force, P00/P02 octave, P01 scale, P10/P11 volume.
+// S30..S35 on ADC 0..5, faders S36/S37 on ADC 6,7. S07/S08 freeze / latch,
+// S09/S10 mod source. Control runs in the main loop: the engine is not reentrant.
 
 #pragma once
 
@@ -24,11 +10,8 @@ namespace panel
 {
 constexpr int kPads = 12;
 
-// Poll and PollPads run once every this many audio blocks, so at 48 kHz in
-// blocks of 48 they run at 250 Hz. Synthux's own firmware for this board
-// polls at the same rate: the block-rate burst of panel work couples into
-// the analog side as a tone, and 4 ms of touch latency is the price of
-// moving it down and thinning it out.
+// 250 Hz, the rate Synthux's own firmware uses: panel work at block rate
+// couples into the analog side as a tone. 4 ms of latency is the price.
 constexpr int kPollDiv = 4;
 
 // `poll_rate` is how often Poll will actually be called, in Hz. It sets

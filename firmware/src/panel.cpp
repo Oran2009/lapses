@@ -26,16 +26,8 @@ bool     pads_ok   = false;
 uint16_t pad_state = 0, last_pads = 0;
 int      blink     = 0;
 
-// Delta at full press. One number for every pad: the MPR121 autoconfigures
-// each electrode's charge current into the same window at boot, so it has
-// already equalised them on whatever board it is soldered to. The seven
-// inherited values (375/460/375/375/375/425/425, from Synthux Academy's
-// github.com/Synthux-Academy/TouchString) had the right average and the
-// wrong shape -- over 165 logged presses this board read 364 to 428 across
-// all seven, a spread of +-8% against the table's +-11%, and not in the
-// same places: pad 1 was configured highest and is ordinary, pad 3 is the
-// weakest pad there is. 400 leaves 7 of those 165 presses saturated against
-// 31 at 375, with the median press at 0.70 -- room above it to lean into.
+// Delta at full press, one number for all seven -- the MPR121 equalises the
+// electrodes at boot. 165 logged presses read 364 to 428; 400 saturates 7.
 constexpr float kMaxDelta = 400.0f;
 float pressure[synth::kPads] = {};
 int   press_turn             = 0;
@@ -95,11 +87,8 @@ void PollPads()
         return;
     pad_state = mpr.Touched();
 
-    // Contact force, one electrode per poll. Reading all seven every time
-    // costs 21 bytes of blocking I2C in the main loop where the touch read
-    // costs two, which starved the loop and broke up the audio. Round robin
-    // refreshes each pad every 28 ms -- ample for leaning on a pad, which is
-    // a gesture you make over a tenth of a second at least.
+    // One electrode per poll: seven is 21 bytes of blocking I2C against the
+    // touch read's 2, and starved the loop. 28 ms a pad.
     const int p = press_turn;
     press_turn  = (press_turn + 1) % synth::kPads;
     const int e = p + kFirstPad;
@@ -112,8 +101,7 @@ void PollPads()
         const int delta = base > filt ? base - filt : 0;
         if(delta >= 6)
         {
-            // Squared, so an ordinary press sits low and the top of the
-            // range is somewhere you have to lean to reach
+            // Squared, so the top of the range is somewhere you lean to reach
             const float n = (float)(delta - 5) / (kMaxDelta - 5.0f);
             target        = n > 1.0f ? 1.0f : n * n;
         }
