@@ -405,7 +405,7 @@ float Pan(int i) { return v[i].pan_now; }
 float LoopLevel(int i) { return v[i].fast; }
 float OutGain(int i) { return v[i].outg; }
 float BusLvl(int i) { return v[i].out_lvl * v[i].wet * v[i].outg; }
-float PopPeak(int i)
+float Peak(int i)
 {
     const float p = v[i].pk;
     v[i].pk       = 0.0f;
@@ -557,7 +557,7 @@ void Control(double now, float dt)
         vo.depth_now = dpe;
 
         // gain and drive snap, the delay crawls
-        if(wfc::PopFlash(i) == 2)
+        if(wfc::Flash(i) == 2)
         {
             vo.sweep = kSweepT;
             vo.fb    = vo.fb_t;

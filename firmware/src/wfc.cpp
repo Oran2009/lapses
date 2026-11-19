@@ -425,11 +425,11 @@ int RandomModOpt()
 // ---------------------------------------------------------------- the knobs
 
 Knobs&        K() { return knob; }
-bool          PopBreak()
+bool          Broke()
 {
-    const bool was = broke;
-    broke          = false;
-    return was;
+    const bool b = broke;
+    broke        = false;
+    return b;
 }
 void          SetFrozen(bool on) { frozen = on; }
 bool          Frozen() { return frozen; }
@@ -570,11 +570,11 @@ int ShownTile(int v) { return shown_tile[v]; }
 int ShownMod(int v) { return shown_mod[v]; }
 int ShownSkew(int v) { return shown_skew[v]; }
 
-int PopFlash(int v)
+int Flash(int v)
 {
-    const int was = flash[v];
-    flash[v]      = 0;
-    return was;
+    const int f = flash[v];
+    flash[v]    = 0;
+    return f;
 }
 
 // ----------------------------------------------------------------- the work

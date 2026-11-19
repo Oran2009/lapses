@@ -110,11 +110,11 @@ void PollPads()
     synth::SetPressure(p, pressure[p]);
 }
 
-int PopBlink()
+int Blink()
 {
-    const int pending = blink;
-    blink             = 0;
-    return pending;
+    const int b = blink;
+    blink         = 0;
+    return b;
 }
 
 void Poll()

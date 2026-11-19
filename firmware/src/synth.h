@@ -51,8 +51,8 @@ void Process(float* l, float* r, int n);
 // 0..1 for the LED: the loudest envelope
 float Level();
 
-// once per delivered break, for the LED's stutter
-bool PopBreak();
+// once per delivered break, for the LED's stutter. reading clears it
+bool Broke();
 
 // output trim in 3 dB steps, 0 to -30 dB; true when it moved
 bool ShiftGain(int delta);

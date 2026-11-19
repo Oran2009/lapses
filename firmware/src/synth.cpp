@@ -520,6 +520,6 @@ void Freeze(bool on)
 bool Frozen() { return wfc::Frozen(); }
 
 float Level() { return voices::Level(); }
-bool  PopBreak() { return wfc::PopBreak(); }
+bool  Broke() { return wfc::Broke(); }
 
 }  // namespace synth

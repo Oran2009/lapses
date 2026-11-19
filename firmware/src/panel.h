@@ -31,6 +31,7 @@ void PollPads();
 bool PadsOk();
 
 // once per octave or volume pad touch, for the LED. 2 = already at the end.
-int PopBlink();
+// reading clears it
+int Blink();
 
 }  // namespace panel
