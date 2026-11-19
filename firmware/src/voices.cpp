@@ -3,7 +3,7 @@
 #include <math.h>
 #include <string.h>
 
-// 1.5 MB together, which only fits in the Daisy's SDRAM
+// 1.5 MB: SDRAM only
 #ifdef __arm__
 #define SLOW_BSS __attribute__((section(".sdram_bss")))
 #else
@@ -17,25 +17,24 @@ namespace
 constexpr int kPartials = 8;
 
 
-// source and loop together: the loop snaps to whole periods, so noise pitches
+// the loop snaps to whole periods, so noise pitches
 struct Model
 {
     const char* name;
     float ratio[kPartials];   // partial frequencies, times the pitch
     float amp[kPartials];     // and their levels
-    float rolloff;   // scales the pitch-dependent spectral tilt
-    float tone;      // how much of the partial stack reaches the line
-    float noise;     // and how much broadband noise goes in beside it
-    float drive;     // shaping the source before the line, not inside it
-    float motion;    // how fast the partials re-roll; 1 is as it was
-    float cents;     // and how far they wander
-    float dly_mul;   // the loop's length, so the body can be small
-    float damp;      // and its lowpass, so the body can be bright or dead
+    float rolloff;   // spectral tilt
+    float tone;      // partials into the line
+    float noise;     // noise beside them
+    float drive;     // before the line, not inside
+    float motion;    // re-roll rate
+    float cents;     // wander
+    float dly_mul;   // loop length
+    float damp;      // loop lowpass
     float atk;       // the VCA's speed
-    float out;       // and its level, so the three audition level-matched
+    float out;       // VCA level, so the three audition matched
 };
 
-// levels calibrated so the three audition at the same loudness
 constexpr Model kModel[kModels] = {
     // 0. as it was: six harmonics, two unisons
     {"as-is",
@@ -59,7 +58,7 @@ constexpr Model kModel[kModels] = {
 int cur_model = 0;
 inline const Model& M() { return kModel[cur_model]; }
 
-// S09/S10 picks what drives the mod; all three destinations move together
+// what drives the mod; all three destinations move
 enum
 {
     kModStep = 0,   // up: jump and hold
@@ -72,41 +71,40 @@ float sr        = 48000.0f;
 float inv_sr    = 1.0f / 48000.0f;
 int   block     = 48;
 
-// lowpass alone rings the low-mids for ever, which is the mud
+// lowpass alone rings the low-mids for ever
 constexpr float kLoopHpHz = 150.0f;
 
-// knob-move crossfade: short, but not a click
+// short, but not a click
 constexpr float kXfadeT = 0.03f;
 
-// seconds shed per second; 1.0 is the write head, 0.5 an octave down
+// 1.0 is the write head, 0.5 an octave down
 constexpr float kMaxSlew   = 0.5f;
-// the panel delivers a step every 6 ms
+// the panel steps every 6 ms
 constexpr float kKnobGlide = 0.05f;
 
 
 
-// crawl for a broken delay, long enough to read as a pitch bend. Not measured.
+// long enough to read as a pitch bend
 constexpr float kSweepT = 1.2f;
 
-// room is made at the bus, not the envelope. 16 seeds, separation 2.12 against 1.63.
+// room is made at the bus, not the envelope
 constexpr float kWashTarget = 0.12f;   // the level the wash ducks TO
 constexpr float kDuckFloor  = 0.25f;   // and the deepest it may be ducked
 constexpr float kRoomCeil   = 0.55f;   // and the shallowest
-// median press goes +3.6 -> +5.4 dB; 8 peaked at 2.87
 constexpr float kLiftOut = 4.0f;
 constexpr float kRefHz   = 330.0f;   // the pitch at which that is unscaled
-// how long a press stays fresh: lift, duck and brightness all ride on it
+// how long a press stays fresh
 constexpr float kFreshT  = 0.7f;
 float           loop_hp_c = 0.0f;
 
 // --------------------------------------------------------------- the maths
 
-// one period, power of two, plus a guard entry for the interpolation
+// power of two, plus a guard entry
 constexpr int kSinBits = 12;
 constexpr int kSinLen  = 1 << kSinBits;
 float         sin_tab[kSinLen + 1];
 
-// phase as a uint32 turn: 1.5 M sines a second, which sinf will not give
+// 1.5 M sines a second; sinf will not give that
 inline float SinQ(uint32_t ph)
 {
     constexpr int   shift = 32 - kSinBits;
@@ -122,7 +120,7 @@ inline float Clamp(float x, float a, float b)
     return x < a ? a : (x > b ? b : x);
 }
 
-// the prototype's clamp to [-1,1] is part of the sound; within 2e-4 of tanhf
+// the prototype's clamp is part of the sound
 inline float Shape(float x)
 {
     x            = Clamp(x, -1.0f, 1.0f);
@@ -130,7 +128,7 @@ inline float Shape(float x)
     return x * (27.0f + s) / (27.0f + 9.0f * s);
 }
 
-// Web Audio setTargetAtTime one-pole coefficient, at the block rate
+// Web Audio setTargetAtTime, at the block rate
 inline float Coeff(float tau, float dt)
 {
     return tau <= 0.0f ? 1.0f : 1.0f - expf(-dt / tau);
@@ -151,7 +149,7 @@ inline float Rnd() { return Rand() * 2.0f - 1.0f; }
 
 // ------------------------------------------------------------- a one voice
 
-// a slow random walk in cents, a fixed offset, and a wandering level
+// a random walk, a fixed offset, a wandering level
 struct Partial
 {
     uint32_t phase;
@@ -166,7 +164,7 @@ struct Partial
     double   next;      // when this partial next re-rolls
 };
 
-// topology-preserving: Chamberlin needs g < 2 - 1/Q, zero at the loop's Q = 0.5
+// Chamberlin needs g < 2 - 1/Q, zero at Q = 0.5
 struct Svf
 {
     float ic1, ic2;
@@ -203,9 +201,9 @@ struct Voice
     float* line;
     int    wr;
 
-    // _t targets, recomputed each control tick
+    // _t targets, per control tick
     float vca, vca_t;
-    // lifted after a press, so a new pad speaks before it dissolves
+    // lifted after a press, so a new pad speaks
     float fresh;
     float loop_hp, loop_hp2;   // the loop highpass's state, one per tap
     float vcut, vcut_t;
@@ -223,24 +221,24 @@ struct Voice
     float    lvl_sum;          // |loop| over the last block
     int      lvl_n;
     float    out_lvl;          // and the finished value, for the duck
-    // loudest sample on the bus, for the press log
+    // loudest sample on the bus
     float    pk;
-    // tap at the last block's end; a Delay turn moved it 9000 samples at once. -1 unset.
+    // tap at the last block's end; -1 unset
     float    ds_p, ds2_p;
-    // what Process resolved this block, for the display
+    // what Process resolved, for the display
     float    eff_dly, eff_fb, eff_pre, pan_now, depth_now;
     float    m_dly, m_dly_t;
     float    m_fb, m_fb_t;
     float    m_pre, m_pre_t;
     float    sweep;   // seconds of slow delay travel left after a break
-    // a solver move crossfades, a knob move glides; told apart by cause
+    // solver moves crossfade, knob moves glide
     int      dtile;
     bool     dly_jump;
-    // what the levels were last computed for: sixteen powf calls are not free
+    // sixteen powf calls are not free
     float    pf_hz;
     int      pf_model;
     float    pf_ref;
-    // tilt reference, the chord's root an octave up; travels with the voice
+    // tilt reference; travels with the voice
     float    ref;
     float    outg, outg_t;   // what this voice sends to the bus
     float    dryl, dryl_t;   // extra dry while it is the fresh one
@@ -249,7 +247,7 @@ struct Voice
     float    frate;              // and its rate, the one Delay does not set
     float    step_t, step_left;  // where the step is going, and when next
 
-    // last out of the distortion; reading it breaks the algebraic loop
+    // reading it breaks the algebraic loop
     float post_prev;
 
     float pan_l, pan_r;
@@ -260,13 +258,12 @@ struct Voice
 Voice     v[wfc::kVoices];
 float SLOW_BSS delay_mem[wfc::kVoices][kDelayMax];
 
-// THE LINK, on S35: one delay all seven voices feed and read; zero is out
+// THE LINK, on S35: one delay all seven feed and read
 constexpr float kLinkDly = 0.41f;   // a multiple of no voice's period, on purpose
-// at the bus, one pad held: 1/7 and 0.25 left the rest 26 dB under, this 9 dB
 float kLinkSend = 0.38f;   // 1/sqrt(7): seven different notes, not seven copies
 float kLinkFb   = 0.55f;
 float kLinkRet  = 0.20f;
-// the pool drives each distortion too. Share above 3 kHz: off 0.068, this 0.135.
+// the pool drives each distortion too
 constexpr float kLinkDrv = 9.0f;
 float link_env = 0.0f, link_env_c = 0.0f;
 float link_g = 0.0f;   // ramped: a jump to full is a click in all seven at once
@@ -274,7 +271,7 @@ float SLOW_BSS link_mem[kDelayMax];
 int   link_wr   = 0;
 float link_prev = 0.0f, link_lp = 0.0f, link_lp_c = 0.0f;
 
-// rebuilt whenever dt changes, which it never does
+// rebuilt when dt changes, which it never does
 struct
 {
     float dt;
@@ -299,12 +296,12 @@ void Recoeff(float dt, float glide)
 
 void SetPartialFreqs(Voice& vo, bool snap)
 {
-    // shallower for low notes: 58% of a 220 Hz voice above 500 Hz, was 42%
+    // shallower for low notes
     const bool relevel = snap || vo.pf_hz != vo.hz || vo.pf_model != cur_model
                          || vo.pf_ref != vo.ref;
     if(relevel)
     {
-        // against the chord's root, not 440: hardwired cost 8.8% in overtones
+        // the chord's root, not 440: hardwired cost overtones
         const float tilt
             = Clamp(1.9f - 1.5f * logf(vo.ref / vo.hz) * 1.442695f, 0.55f, 1.9f)
               * M().rolloff;
@@ -318,9 +315,9 @@ void SetPartialFreqs(Voice& vo, bool snap)
     {
         Partial&    p  = vo.p[k];
         const float kk = M().ratio[k];
-        // inharmonicity, so the partials beat rather than lock
+        // so the partials beat rather than lock
         const float f  = vo.hz * kk * (1.0f + 0.00015f * kk * kk);
-        // 2^(cents/1200) by series: two terms are good to a twentieth of a cent here
+        // two terms are good to a twentieth of a cent here
         const float x   = p.det * (0.69314718f / 1200.0f);
         const float det = 1.0f + x * (1.0f + 0.5f * x);
         if(snap)
@@ -347,9 +344,9 @@ void Init(float sample_rate, int block_size)
         h = true;
     loop_hp_c = 1.0f - expf(-2.0f * 3.14159265f * kLoopHpHz * inv_sr);
     link_lp_c = 1.0f - expf(-2.0f * 3.14159265f * 2000.0f * inv_sr);
-    // both shells re-assert the switch every poll anyway
+    // the shells re-assert it every poll anyway
     mod_mode  = kModFollow;
-    // 30 ms: the pool's level, not its waveform
+    // the pool's level, not its waveform
     link_env_c = 1.0f - expf(-inv_sr / 0.03f);
     link_env   = 0.0f;
     memset(link_mem, 0, sizeof(link_mem));
@@ -381,7 +378,7 @@ void Init(float sample_rate, int block_size)
         vo.pre = vo.pre_t = 1.0f;
         vo.mspeed = vo.mspeed_t = 0.5f;
         vo.fast = vo.slow = vo.lvl_sum = vo.out_lvl = vo.pk = 0.0f;
-        // its own phase and first step, or seven voices move as one
+        // or seven voices move as one
         vo.frate     = 0.54f;
         vo.mod_ph    = (uint32_t)(Rand() * 4294967296.0f);
         vo.step_t    = Rnd();
@@ -405,10 +402,10 @@ void Init(float sample_rate, int block_size)
         }
         SetPartialFreqs(vo, true);
 
-        // equal power, matching Web Audio's StereoPanner
+        // equal power, as Web Audio's StereoPanner
         vo.pan_base = ((float)i / (float)(wfc::kVoices - 1) * 2.0f - 1.0f)
                       * 0.6f;
-        // own slow drift, not the mod: a static image is what sounds fixed
+        // own slow drift: a static image sounds fixed
         vo.pan_ph  = (uint32_t)(Rand() * 4294967296.0f);
         vo.pan_inc = (uint32_t)((0.02f + Rand() * 0.04f) * 4294967296.0f
                                 * (float)block * inv_sr);
@@ -424,11 +421,11 @@ int  ModMode() { return mod_mode; }
 void SetModel(int m)
 {
     m = m >= 0 && m < kModels ? m : 0;
-    // idempotent: the shells call this every pass, and re-deriving is a click
+    // idempotent: re-deriving is a click
     if(m == cur_model)
         return;
     cur_model = m;
-    // the spectrum changes shape, so re-derive rather than glide
+    // the spectrum changes shape, so re-derive
     for(int i = 0; i < wfc::kVoices; i++)
         SetPartialFreqs(v[i], true);
 }
@@ -485,7 +482,7 @@ void SetPadHeld(int v, bool on) { pad_held[v] = on; }
 bool HoldSustains(int v)
 {
     (void)v;
-    // 0.02 is -34 dB: below that the floor should not pin a voice into the graph
+    // below this the floor should not pin a voice
     return wfc::K().hold > 0.02f;
 }
 
@@ -504,10 +501,10 @@ void Control(double now, float dt)
     const float mspeed0 = wfc::ModSpeed0();
     const float atk   = wfc::AttackT();
     const float rel   = wfc::ReleaseT();
-    // longest the buffer can serve, with a sample for the second tap
+    // longest the buffer can serve
     const float dly_max = (float)(kDelayMax - 2) * inv_sr;
 
-    // a press makes room: the others' wash steps back. Output tap only.
+    // the others' wash steps back; output tap only
     float duck[wfc::kVoices], room[wfc::kVoices];
     for(int i = 0; i < wfc::kVoices; i++)
     {
@@ -520,7 +517,7 @@ void Control(double now, float dt)
                     duck[i] = v[j].fresh;
                 wash += v[j].out_lvl * v[j].wet;
             }
-        // duck to a level, not a fraction: output is flat across 24 tiles, the wash roams 10x
+        // a level, not a fraction: the wash roams
         room[i] = Clamp(wash > 1e-6f ? kWashTarget / wash : 1.0f, kDuckFloor,
                         kRoomCeil);
     }
@@ -530,11 +527,11 @@ void Control(double now, float dt)
         Voice&     vo = v[i];
         const bool on = wfc::Sounding(i);
 
-        // follows the Delay knob: long echoes get a long release
+        // long echoes get a long release
         {
-            // a floor, not a longer release: a pad press rides on top
+            // a floor, not a longer release
             const bool  sel = true;
-            // the floor ducks too, or five drones bury the pad you pressed
+            // or five drones bury the pad you pressed
             const float flr
                 = sel ? wfc::K().hold * (1.0f - 0.5f * duck[i]) : 0.0f;
             const float tgt = fmaxf(on && pad_held[i] ? 1.0f : 0.0f, flr);
@@ -552,7 +549,7 @@ void Control(double now, float dt)
         const float R = wfc::RL[wfc::TileR(tile)];
         const float D = wfc::DR[wfc::TileD(tile)];
 
-        // each partial re-rolls its detune and level on its own schedule
+        // each partial on its own schedule
         for(int k = 0; k < kPartials; k++)
         {
             Partial& p = vo.p[k];
@@ -572,10 +569,10 @@ void Control(double now, float dt)
         }
         SetPartialFreqs(vo, false);
 
-        // an idle loop dies away, so a released pad leaves nothing ringing
+        // a released pad leaves nothing ringing
         const float feff
             = Clamp((on ? F : (F < 0.75f ? F : 0.75f)) * fbm, 0.0f, 1.3f);
-        // unbroken delays snap to whole periods of the pitch; inaudible, but free
+        // snapped to whole periods: inaudible, but free
         const float t0 = base * D * M().dly_mul * (skew ? wfc::kSkew : 1.0f);
         float       d  = skew ? t0 : floorf(t0 * vo.hz + 0.5f) / vo.hz;
         if(!skew && d * vo.hz < 1.0f)
@@ -594,7 +591,7 @@ void Control(double now, float dt)
         vo.pre_t  = pre;
         vo.wet_t  = 0.8f * sqrtf(pre) * 0.7f;
         vo.outg_t = 1.0f - duck[i] * duck[i] * (1.0f - room[i]);
-        // dry only: a new loop has not filled, so lifting its output lifts silence
+        // a new loop has not filled, so it would lift silence
         const float slow = Clamp(kRefHz / vo.hz, 0.5f, 3.0f);
         vo.dryl_t = 1.0f + kLiftOut * slow * vo.fresh * vo.fresh;
         Approach(vo.fresh, 0.0f, co.fresh);
@@ -604,10 +601,10 @@ void Control(double now, float dt)
                           150.0f,
                           12000.0f);
 
-        // the mod rides the envelope, so a silent voice's line stays still
+        // a silent voice's line stays still
         const float dpe = wfc::DP[wfc::ModDepthOf(lo)] * modm * vo.amp;
         vo.mspeed_t      = mspeed0 * wfc::MS[wfc::ModSpeedOf(lo)];
-        // not ModSpeed0: that is a reaction time, and an LFO reacts to nothing
+        // ModSpeed0 is a reaction time; an LFO reacts to nothing
         constexpr float kFreeHz = 0.54f;
         vo.frate         = kFreeHz * wfc::MS[wfc::ModSpeedOf(lo)];
         vo.m_dly_t = dly * 0.08f * dpe;
@@ -615,7 +612,7 @@ void Control(double now, float dt)
         vo.m_pre_t = pre * 0.35f * dpe;
         vo.depth_now = dpe;
 
-        // gain and drive snap, the delay crawls; that scrub is the gesture
+        // gain and drive snap, the delay crawls
         if(wfc::TakeFlash(i) == 2)
         {
             vo.sweep = kSweepT;
@@ -646,12 +643,11 @@ void Control(double now, float dt)
         Approach(vo.slow, lvl, Coeff(tau * 8.0f, dt));
         if(mod_mode == kModFollow)
         {
-            // 45 measured: at 14 this sat at an rms of 0.09 and read as nothing
             vo.mod = Shape((vo.fast - vo.slow) * 45.0f);
         }
         else if(mod_mode == kModLfo)
         {
-            // geared down 10x: straight across was 0.18-0.55 Hz and read as an LFO
+            // geared down: straight across read as an LFO
             constexpr float kLfoGear = 0.1f;
             vo.mod_ph += (uint32_t)(vo.frate * kLfoGear * dt * 4294967296.0f);
             vo.mod = SinQ(vo.mod_ph);
@@ -664,7 +660,7 @@ void Control(double now, float dt)
                 vo.step_left = (0.5f + Rand() * 1.5f) / vo.frate;
                 vo.step_t    = Rnd();
             }
-            // a step into feedback gain is a click, and 30 ms still reads as a jump
+            // a step into feedback gain is a click
             Approach(vo.mod, vo.step_t, Coeff(0.03f, dt));
         }
 
@@ -676,20 +672,20 @@ void Control(double now, float dt)
         vo.pan_l      = cosf(a);
         vo.pan_r      = sinf(a);
 
-        // coefficients once a tick, not once a sample
+        // once a tick, not once a sample
         vo.vlp.Set(vo.vcut, 0.8f);
         vo.llp.Set(vo.lcut, 0.5f);
         vo.llp2.Set(vo.lcut, 0.5f);
     }
 }
 
-// once per RENDERED block: Control skips blocks under load and a fade would stall
+// Control skips blocks under load, so a fade would stall
 void AdvanceTaps(float dt)
 {
     for(int i = 0; i < wfc::kVoices; i++)
     {
         Voice& vo = v[i];
-        // a break drags the tap; a knob move crossfades instead
+        // a break drags the tap; a knob move crossfades
         const bool sweeping = vo.sweep > 0.0f;
         if(sweeping)
             vo.sweep -= dt;
@@ -706,7 +702,7 @@ void AdvanceTaps(float dt)
             {
                 vo.dly = vo.dly_n;
                 vo.xf = vo.xf_t = 0.0f;
-                // the main tap snaps to where the fade left it, or it pops once per fade
+                // snapped, or it pops once per fade
                 vo.ds_p = vo.ds2_p = -1.0f;
             }
             if(vo.xf > 0.0f)
@@ -715,17 +711,17 @@ void AdvanceTaps(float dt)
             {
                 const float d  = vo.dly_t - vo.dly;
                 const float ad = d < 0.0f ? -d : d;
-                // a crossfade splices the loop onto a decorrelated part of its line
+                // splices onto a decorrelated part of the line
                 if(vo.dly_jump)
                 {
-                    // one fade at a time: a target landing mid-fade waits a block
+                    // a target landing mid-fade waits a block
                     vo.dly_jump = false;
                     vo.dly_n    = vo.dly_t;
                     vo.xf_t     = dt / kXfadeT;
                 }
                 else if(ad > 1e-5f)
                 {
-                    // capped, or the tap outruns the write head and reads backwards
+                    // or the tap outruns the write head
                     float       st  = (vo.dly_t - vo.dly) * Coeff(kKnobGlide, dt);
                     const float lim = kMaxSlew * dt;
                     if(st > lim)
@@ -740,7 +736,7 @@ void AdvanceTaps(float dt)
     }
 }
 
-// wrapped by subtraction: kDelayMax is not a power of two, so % is five divides a sample
+// kDelayMax is not a power of two, so % is a divide
 inline float Rd(const float* line, int wr, float d)
 {
     const float dc = Clamp(d, 2.0f, (float)(kDelayMax - 2));
@@ -764,18 +760,18 @@ void Process(float* out_l, float* out_r, int n, const float* in,
     const bool  lact = link_g > 1.0e-4f;
 
     AdvanceTaps((float)n * inv_sr);
-    // resolved once a block; the mod and every smoothed value hold still across it
+    // the mod and every smoothed value hold still across it
     float dsamp[wfc::kVoices], dsamp2[wfc::kVoices], fbg[wfc::kVoices],
         preg[wfc::kVoices], postg[wfc::kVoices];
-    // only for a voice mid-crossfade
+    // only mid-crossfade
     float dsampn[wfc::kVoices], xf[wfc::kVoices], xfi[wfc::kVoices];
-    // per-sample steps, so each tap glides across the block
+    // so each tap glides across the block
     float dsampi[wfc::kVoices], dsamp2i[wfc::kVoices], dsampni[wfc::kVoices];
     const float inv_n = n > 0 ? 1.0f / (float)n : 0.0f;
     for(int i = 0; i < wfc::kVoices; i++)
     {
         Voice& vo = v[i];
-        // the mod adds, as a Web Audio mod on an AudioParam does
+        // as a Web Audio mod on an AudioParam does
         const float d  = (vo.dly + vo.mod * vo.m_dly) * sr;
         const float dg = Clamp(d, 2.0f, (float)(kDelayMax - 2));
         if(vo.ds_p < 0.0f)
@@ -783,7 +779,7 @@ void Process(float* out_l, float* out_r, int n, const float* in,
         dsamp[i]  = vo.ds_p;
         dsampi[i] = (dg - vo.ds_p) * inv_n;
         vo.ds_p   = dg;
-        // 1.3% further back, so the loop reads wide instead of as one point
+        // so the loop reads wide, not as one point
         const float d2 = Clamp(dg * 1.013f, 2.0f, (float)(kDelayMax - 2));
         if(vo.ds2_p < 0.0f)
             vo.ds2_p = d2;
@@ -792,7 +788,7 @@ void Process(float* out_l, float* out_r, int n, const float* in,
         vo.ds2_p   = d2;
         xf[i]     = vo.xf;
         xfi[i]    = n > 0 ? (vo.xf_t - vo.xf) / (float)n : 0.0f;
-        // not glided: a crossfade moves to this tap, and a break must land at once
+        // a crossfade moves to this tap; a break lands at once
         const float dn = (vo.dly_n + vo.mod * vo.m_dly) * sr;
         const float ng = Clamp(dn, 2.0f, (float)(kDelayMax - 2));
         dsampn[i]      = ng;
@@ -801,12 +797,12 @@ void Process(float* out_l, float* out_r, int n, const float* in,
         preg[i]       = vo.pre + vo.mod * vo.m_pre;
         if(preg[i] < 0.01f)
             preg[i] = 0.01f;
-        // post unmodulated: that is what lets the mod change gain, not colour
+        // unmodulated: the mod changes gain, not colour
         postg[i] = 1.0f / vo.pre;
-        // post left alone, so this changes grit and not level
+        // changes grit, not level
         preg[i] *= 1.0f + kLinkDrv * link_env * link_g;
 
-        // mid-crossfade both taps sound; report the louder, for the display
+        // report the louder, for the display
         vo.eff_dly = (xf[i] > 0.5f ? ng : dg) * inv_sr;
         vo.eff_fb  = fbg[i];
         vo.eff_pre = preg[i];
@@ -817,7 +813,7 @@ void Process(float* out_l, float* out_r, int n, const float* in,
         float l = 0.0f, r = 0.0f;
         const float lpv  = link_prev;
         float       lsum = 0.0f;
-        // captured first, so every feedback tap reads the same previous output
+        // so every feedback tap reads the same previous output
         float prev[wfc::kVoices];
         for(int i = 0; i < wfc::kVoices; i++)
             prev[i] = v[i].post_prev;
@@ -833,33 +829,33 @@ void Process(float* out_l, float* out_r, int n, const float* in,
                 vo.p[k].phase += vo.p[k].inc;
             }
             src *= 0.3f * M().tone;
-            // noise before the filter, so both it and the loop shape it
+            // before the filter, so both it and the loop shape it
             if(M().noise != 0.0f)
                 src += Rnd() * M().noise;
-            // drive ahead of the line dirties the source, not the echoes
+            // dirties the source, not the echoes
             if(M().drive != 0.0f)
                 src = Shape(src * (1.0f + 8.0f * M().drive));
             src *= M().out;
-            // the partials keep running underneath, so the fade back is in phase
+            // so the fade back is in phase
             if(in)
                 src = src * (1.0f - in_mix) + in[s] * in_mix * 0.5f;
 
             const float dry = vo.vlp.Process(src) * vo.vca;
 
-            // the voice, its own feedback, and whatever is in the link
+            // the voice, its feedback, and the link
             const float in = dry + fbg[i] * prev[i] + lret * lpv;
 
-            // interpolated: the glide moves the tap mid-block
+            // the glide moves the tap mid-block
             vo.line[vo.wr] = in;
             const float out = Rd(vo.line, vo.wr, dsamp[i]);
             float outm = out, o2;
             if(xf[i] > 0.0f)
             {
-                // the wide tap crossfades too, or a turning knob holds it mid-fade
+                // or a turning knob holds it mid-fade
                 const float nv = Rd(vo.line, vo.wr, dsampn[i]);
                 const float wv = Rd(vo.line, vo.wr, dsampn[i] * 1.013f);
                 const float ov = Rd(vo.line, vo.wr, dsamp2[i]);
-                // sqrt, not sin/cos: 12 libm calls a sample broke the audio
+                // sin/cos was 12 libm calls a sample
                 const float x  = xf[i] > 1.0f ? 1.0f : xf[i];
                 const float ga = sqrtf(1.0f - x), gb = sqrtf(x);
                 outm           = out * ga + nv * gb;
@@ -883,12 +879,12 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             vo.lvl_sum += pst < 0.0f ? -pst : pst;
             vo.lvl_n++;
 
-            // its own copy of the loop's filters; unfiltered it went dirty
+            // unfiltered it went dirty
             const float lp2 = vo.llp2.Process(o2);
             vo.loop_hp2 += (lp2 - vo.loop_hp2) * loop_hp_c;
             const float pst2 = Shape((lp2 - vo.loop_hp2) * preg[i]) * postg[i];
 
-            // one tap per channel: panning the side tap opposite pulled the centre
+            // panning it opposite pulled the centre
             const float mix = dry * (1.0f - in_mix) * vo.dryl;
             const float cl = (mix + pst * vo.wet) * vo.pan_l * vo.outg;
             const float ca = cl < 0.0f ? -cl : cl;
@@ -906,7 +902,7 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             const float co = Rd(link_mem, link_wr, kLinkDly * sr);
             link_wr        = link_wr + 1 >= kDelayMax ? 0 : link_wr + 1;
             link_lp += (co - link_lp) * link_lp_c;
-            // soft clip: the path out and back can pass unity at high feedback
+            // out and back can pass unity at high feedback
             link_prev = Shape(link_lp);
             link_env += (fabsf(link_prev) - link_env) * link_env_c;
         }

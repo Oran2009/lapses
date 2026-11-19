@@ -14,11 +14,11 @@ constexpr int kGroupSize = kVoices / kGroups;
 inline int    GroupOf(int v) { return v / kGroupSize; }
 constexpr int kPads   = 7;
 
-// multiples of the base time on a 1/6 grid, so any set is related
+// base-time multiples on a 1/6 grid, so any set is related
 constexpr int   kDelays = 7;
 constexpr float DR[kDelays]
     = {1.0f, 4.0f / 3, 3.0f / 2, 2.0f, 5.0f / 2, 3.0f, 4.0f};
-// small on purpose: a break lands inside the gap and the echoes flam
+// a break lands inside the gap and the echoes flam
 constexpr float kSkew = 1.02f;
 // feedback gain; above 1 the loop rings by itself
 constexpr float FL[5] = {0.2f, 0.45f, 0.7f, 0.9f, 1.08f};
@@ -78,7 +78,6 @@ Knobs&      K();
 // recompute the rule tables; call after any knob move
 void        RebuildRules();
 // one fader for both: sets safe, and unrest from it
-void        SetAgitation(float a);
 
 const Limits& Lim();
 
@@ -102,7 +101,7 @@ float LoopCut();
 float VoiceCutMul();
 float LapseChance();
 
-// holds the solver: no repairs, lapses or unrest; scheduled changes still land
+// no repairs, lapses or unrest; scheduled changes still land
 void SetFrozen(bool on);
 
 bool Frozen();
@@ -112,12 +111,12 @@ float UnrestRate();
 
 void Init(uint32_t seed);
 
-// which voices sound and when each started, for the wave order
+// what sounds and when it started, for the wave order
 void  SetSounding(int v, bool on, double now);
-// while joined each group's rules are charged the louder group's load
+// joined: charged the louder group's load
 void  SetJoined(bool on, double now);
 bool  Sounding(int v);
-// when this voice last started, for the wave order and voice stealing
+// for the wave order and voice stealing
 double StartedAt(int v);
 
 // what WFC has decided
@@ -132,7 +131,7 @@ bool TookBreak();
 int  ShownMod(int v);
 int  ShownSkew(int v);
 
-// once per voice when an event lands; kind 2 = break, 1 = repair
+// when an event lands; kind 2 = break, 1 = repair
 int  TakeFlash(int v);
 
 // ----------------------------------------------------------------- the work
@@ -141,23 +140,23 @@ int  TakeFlash(int v);
 void Pass(int v, double now);
 // a pad let go: the voice's tail gets a tile of its own
 void RerollTail(int v, double now);
-// repair with nothing pinned: after a knob move, a strictness change or a break
+// nothing pinned: after a knob move, a strictness change or a break
 void Heal(double now);
 void Heal(int group, double now);
 // let one rule go; type < 0 picks at random
 void BreakRule(int type, float offset, double now);
 // `prefer` names the voice the break lands on, -1 to pick
 void BreakRule(int type, int group, float offset, double now, int prefer = -1);
-// a knob moved: the rules change now, the repair 350 ms after the last movement
+// rules change now, the repair 350 ms after the last move
 void KnobsMoved(double now);
 
 // deliver due events, and run the heal/lapse/unrest timers
 void Tick(double now);
 
-// events that found the queue full; nonzero means shown_* is stale
+// queue overflows; nonzero means shown_* is stale
 int EventsDropped();
 
-// rules broken now, from the SHOWN state; group >= 0 judges one
+// from the SHOWN state; group >= 0 judges one
 constexpr int kMaxViolations
     = kVoices * 4 + kVoices * (kVoices - 1) / 2 + 2;
 int  Diagnose(Violation* out, int max, int group = -1);

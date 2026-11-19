@@ -10,7 +10,7 @@ namespace
 // repair wander, the prototype's S.wild
 constexpr float kWild = 0.5f;
 
-// xorshift32, so a test can fix the seed
+// fixable seed, for tests
 uint32_t rng_state = 1;
 inline uint32_t Next()
 {
@@ -37,16 +37,16 @@ inline float Smooth(float a, float b, float x)
 
 Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f, 0.0f, 0.0f};
 bool   frozen = false;
-// wave hop; 0.35 lagged the LED by 2 s
+// wave hop
 float  ripple = 0.02f;
-// level from the audio side, so a break lands on an audible voice
+// so a break lands on an audible voice
 float  level[kVoices] = {};
 Limits limits = {};
 
-// rule tables, rebuilt on every knob move
+// rebuilt on every knob move
 uint8_t compat[kDelays * kDelays];
 uint8_t self_ok[kTiles];
-// 10,000 pairs: rebuilt on read, not on every knob twitch
+// on read, not on every knob twitch
 bool tables_dirty = true;
 void EnsureTables();
 
@@ -54,17 +54,17 @@ void EnsureTables();
 int16_t tile[kVoices], shown_tile[kVoices];
 int8_t  mod_opt[kVoices], shown_mod[kVoices];
 uint8_t skew[kVoices], shown_skew[kVoices];
-// per field, so an older event never overwrites a newer
+// so an older event never overwrites a newer
 int32_t seq_tile[kVoices], seq_mod[kVoices], seq_skew[kVoices];
 int32_t seq = 0;
 
 bool  sounding[kVoices];
 double started_at[kVoices];
 int   flash[kVoices];
-// set on delivery, not scheduling, so the LED tracks the sound
+// on delivery, so the LED tracks the sound
 bool  broke = false;
 
-// -1 means the field is not part of this change
+// -1 = not in this change
 struct Change
 {
     int tile, mod, skew;
@@ -79,7 +79,6 @@ struct Event
     int     kind;   // 2 = break, 1 = repair
     Change  ch;
 };
-// ponytail: fixed queue. ~30 events plus carry in one Tick.
 constexpr int kMaxEvents = 48;
 Event         events[kMaxEvents];
 int           n_events = 0, n_dropped = 0;
@@ -89,7 +88,6 @@ double heal_at[kGroups], next_lapse[kGroups], next_unrest[kGroups];
 bool  joined      = false;
 float solve_fm    = -1.0f;
 float table_fm    = -1.0f;
-// Duck, six voices, default knobs, P05 down vs up: 0.69x load at Unrest 0, 0.58x at 0.3
 constexpr float kChargeGain = 4.0f;
 double knob_settle = 0;
 
@@ -104,7 +102,7 @@ int Active(int* act, int group)
     return n;
 }
 
-// what the rules read instead of FbMul(); writes nothing, so any thread may call it
+// writes nothing, so any thread may call it
 float ChargedFb(int group)
 {
     const float fm = FbMul();
@@ -118,7 +116,7 @@ float ChargedFb(int group)
     float load = 0.0f;
     for(int g = 0; g < kGroups; g++)
         load = fmaxf(load, gl[g]);
-    // capped: an empty table falls back to a louder default
+    // an empty table falls back to a louder default
     const float cap = 0.98f
                       * fminf(fminf(limits.Fself / FL[0],
                                     limits.Fshare / FL[0]),
@@ -126,7 +124,7 @@ float ChargedFb(int group)
     return fmaxf(fm, fminf(fm * (1.0f + kChargeGain * load / kGroupSize), cap));
 }
 
-// delay as a multiple of the base time, skew included
+// multiple of the base time, skew included
 float ShownDly(int v)
 {
     return DR[TileD(shown_tile[v])] * (shown_skew[v] ? kSkew : 1.0f);
@@ -142,7 +140,7 @@ float DrBudget(int n)
     return fmaxf(limits.Rself, limits.Dshare * (float)n);
 }
 
-// frozen for the solve; the mod search reads it thousands of times
+// frozen for the solve, read thousands of times
 void SetSolveGroup(int g)
 {
     solve_fm = ChargedFb(g);
@@ -174,7 +172,7 @@ inline bool InList(const int* a, int n, int v)
 
 // --------------------------------------------------------- arc consistency
 
-// narrow every domain to tiles with a partner in every other; false when one empties
+// false when a domain empties
 bool Ac(uint8_t dom[kVoices][kTiles], const int* nodes, int n)
 {
     int  q[kVoices * 4];
@@ -234,7 +232,7 @@ float TileDist(int a, int b)
            + fabsf((float)(TileD(a) - TileD(b))) * 0.3f;
 }
 
-// pin fixed_v (-1 none), settle the rest. Returns voices left alone, -1 no arc consistency.
+// pin fixed_v (-1 none); returns voices left alone, -1 no arc consistency
 int Repair(const int* nodes, int n, const int* order, int fixed_v,
            int fixed_t, int* out)
 {
@@ -257,15 +255,15 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
         for(int v = 0; v < kVoices; v++)
             out[v] = -1;
         int skipped = 0;
-        // a candidate must leave the unplaced voices room at the floor
+        // leave the unplaced voices room at the floor
         const float fmul = solve_fm, dmul = DrvMul();
-        // 5% under Diagnose: the frozen charge rises with the load it creates
+        // under Diagnose: the frozen charge rises with its own load
         float       fleft = FbBudget(n) * 0.95f, dleft = DrBudget(n);
         if(fixed_v >= 0)
         {
             fleft -= FL[TileF(fixed_t)] * fmul;
             dleft -= RL[TileR(fixed_t)] * dmul;
-            // a pin that eats the budget fails, so the caller rerolls
+            // a pin that eats the budget fails
             const float floor_n = (float)(n - 1);
             if(fleft < FL[0] * fmul * floor_n
                || dleft < RL[0] * dmul * floor_n)
@@ -285,7 +283,7 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
                     rest++;
             const float fhold = FL[0] * fmul * (float)rest,
                         dhold = RL[0] * dmul * (float)rest;
-            // cheapest first: current tile, then distance plus jitter
+            // current tile first, then distance plus jitter
             const int cur = tile[node];
             int       cand[kTiles];
             float     cost[kTiles];
@@ -328,7 +326,7 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
                 else
                     memcpy(dom, snap, sizeof(dom));
             }
-            // nothing legal: keep the tile, still spend what it costs
+            // nothing legal: keep the tile
             if(!done)
             {
                 skipped++;
@@ -336,7 +334,7 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
                 dleft -= RL[TileR(cur)] * dmul;
             }
         }
-        // another roll for a full settle, not for a partial
+        // another roll only for a full settle
         if(!skipped || attempt == 3)
             return skipped;
     }
@@ -357,7 +355,7 @@ bool RepairMod(const int* act, int n, int fixed_v, int fixed_opt,
 
 // ---------------------------------------------------------------- the wave
 
-// a REPLAY, not propagation; order is by recency
+// a replay, not propagation; newest first
 int ApplyWave(const Change* ch, const int* order, int n, int kind,
               float offset, double now)
 {
@@ -415,7 +413,7 @@ int RandomTile()
 
 int RandomModOpt()
 {
-    // ignoring the knob here made turning mod up answer with depth 0
+    // or turning mod up answers with depth 0
     const float want  = knob.mod * 3.0f;
     int         depth = (int)(want * (0.4f + 0.8f * Rand()) + 0.5f);
     depth             = depth < 0 ? 0 : (depth > 3 ? 3 : depth);
@@ -454,17 +452,10 @@ float AttackT() { return 0.243f; }
 float ModSpeed0() { return Clamp(1.0f / (DelayBase() * 8.0f), 0.08f, 2.5f); }
 float FbMul() { return Lerp(0.5f, 1.5f, knob.fb); }
 float DrvMul() { return Lerp(0.4f, 1.6f, knob.drive); }
-// raised from 1.5 when the mod rule went
+// the knob is the only ceiling
 float ModMul() { return Lerp(0.0f, 4.0f, knob.mod); }
 float LoopCut() { return 300.0f * powf(24.0f, knob.filter); }
 float VoiceCutMul() { return Lerp(1.5f, 14.0f, knob.filter); }
-// ponytail: dead code, nothing calls this
-void SetAgitation(float a)
-{
-    knob.safe   = Clamp(a, 0.0f, 1.0f);
-    knob.unrest = Smooth(0.33f, 1.0f, knob.safe);
-    RebuildRules();
-}
 
 float LapseChance() { return Lerp(0.0f, 0.5f, knob.unrest); }
 float UnrestRate() { return Lerp(0.0f, 0.25f, knob.unrest); }
@@ -507,7 +498,7 @@ void EnsureTables()
                              && RL[TileR(t)] * dm <= limits.Rself
                          ? 1
                          : 0;
-    // per class pair: 49, not 19,600 tiles
+    // per class pair, not per tile
     for(int a = 0; a < kDelays; a++)
         for(int b = 0; b < kDelays; b++)
         {
@@ -609,14 +600,14 @@ void Pass(int v, double now)
             order[no++] = rest[i];
     }
 
-    // keep rolling for a full settle, accept the last partial
+    // accept the last partial
     int line[kVoices];
     int skipped = -1;
     for(int k = 0; k < 30 && skipped != 0; k++)
         skipped = Repair(act, n, order, v, RandomTile(), line);
     const bool have_line = skipped >= 0;
 
-    // judged against the tiles the line layer just chose
+    // against the tiles just chosen
     int ft[kVoices];
     for(int i = 0; i < kVoices; i++)
         ft[i] = tile[i];
@@ -654,7 +645,7 @@ void RerollTail(int v, double now)
 {
     if(v < 0 || v >= kVoices)
         return;
-    // HOLD can keep a released voice in the graph: re-roll it legally
+    // HOLD can hold it in the graph
     if(sounding[v])
     {
         Pass(v, now);
@@ -704,7 +695,7 @@ void Heal(int g, double now)
     {
         const int m = order[i];
         ch[m].skew  = 0;
-        // -1 and failure both leave the tile alone
+        // -1 and failure both keep the tile
         ch[m].tile = have_line ? line[m] : -1;
         ch[m].mod  = have_mod ? md[m] : 0;
     }
@@ -790,7 +781,7 @@ void BreakRule(int type, int g, float offset, double now, int prefer)
                     = MkTile(TileD(tb), TileF(tb) < 2 ? TileF(tb) : 2, 3);
             break;
     }
-    // 0 means no voice moved: reroll, or the lean is silent
+    // 0 = nothing moved: reroll
     if(ApplyWave(ch, order, n, 2, offset, now) == 0)
     {
         for(int i = 0; i < kVoices; i++)

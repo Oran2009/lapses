@@ -7,7 +7,7 @@
 
 namespace voices
 {
-// 2 s at 48 kHz; the delay clamps to 1.9 s for the interpolator's next tap
+// 2 s at 48 kHz; the delay clamps to 1.9 s
 constexpr int kDelayMax = 96000;
 
 // SPIKE: three voice baselines, GUI only; 0 is the voice as it was
@@ -31,19 +31,19 @@ void Control(double now, float dt);
 
 // bit g set: HOLD is group g's amplitude floor
 
-// the pad's own state; a voice HOLD keeps sounding is still released here
+// a voice HOLD keeps sounding is still released here
 void SetPadHeld(int v, bool on);
 // HOLD is floating this voice above silence, so the solver must count it
 bool HoldSustains(int v);
 
-// adds into out_l/out_r; `in_mix` crossfades each voice from partials to `in`
+// adds into out_l/out_r; `in_mix` fades partials to `in`
 void Process(float* out_l, float* out_r, int n, const float* in = nullptr,
              float in_mix = 0.0f);
 
 // 0..1 envelope; the pad allocator prefers the quietest voice
 float Amp(int v);
 
-// what the audio is using this block: the glided target plus modulation
+// the glided target plus modulation
 float EffDly(int v);     // seconds
 float EffFb(int v);
 float EffDrv(int v);     // the loop's pre-gain
@@ -51,7 +51,7 @@ float Mod(int v);        // the modulator right now, -1..1
 float ModDepth(int v);   // how much of it is being spent, 0..1.5
 float Pan(int v);        // -1..1
 float LoopLevel(int v);
-// bus send: 1 at rest, less while another voice is fresh, more while it is
+// 1 at rest, less while another voice is fresh
 float OutGain(int v);
 float BusLvl(int v);   // what it is putting on the bus right now
 // loudest sample on the bus since the last call

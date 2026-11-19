@@ -10,12 +10,12 @@ constexpr int kPads = wfc::kPads;   // 7, one voice each
 
 void Init(float sample_rate, int block_size);
 
-// pads 0..6; a press re-rolls its voice, nothing sounds unless held
+// a press re-rolls its voice; nothing sounds unless held
 void Press(int pad);
 void Release(int pad);
 // sounding, from contact or from the latch
 bool PadOn(int pad);
-// S07/S08 down: the pads held at that moment stay down until it is released
+// S07/S08 down: the pads held then stay down
 void Latch(bool on);
 bool Latched(int pad);
 // 0..1 contact force; leaning past the threshold breaks the pad's group
@@ -34,7 +34,7 @@ void        NextScale();
 int         Scale();
 const char* ScaleName();
 
-constexpr int kKnobs = 10;   // HANDOFF 4.2's six, plus Unrest, Hold, Link, Shimmer
+constexpr int kKnobs = 10;   // six, plus Unrest, Hold, Link, Shimmer
 
 // 0..1 each; rebuilds the rules and schedules the debounced heal
 void SetKnob(int i, float v);
