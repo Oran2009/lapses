@@ -1,5 +1,4 @@
-// The Touch 2 shell: the callback runs the engine, the main loop reads the
-// panel and drives the LED. Same engine as the PC build.
+// The Touch 2 shell: the callback runs the engine, the main loop the panel and LED.
 
 #include "panel.h"
 #include "synth.h"
@@ -16,36 +15,30 @@ constexpr int kBlock = 48;
 
 
 DaisySeed hw;
-// Double: as a float32 the 1.5 ms step rounds to nothing past 32768 s and
-// the clock stops dead, taking every scheduled break and heal with it.
+// Double: as float32 the 1.5 ms step rounds away past 32768 s and the clock stops.
 double    now_s     = 0.0;
 float     block_dt  = 0.0f;
 uint32_t  blink_until = 0, stutter_until = 0;
 
-// 32 kHz: seven voices at 48 left the board at 96%, and the band it costs
-// us sits 63 dB down.
+// 32 kHz: at 48 seven voices left the board at 96%; the band it costs is 63 dB down.
 constexpr auto kRate = SaiHandle::Config::SampleRate::SAI_32KHZ;
-// From the rate the hardware reports, not a constant: the overruns below
-// are measured against it.
+// From the rate the hardware reports: the overruns below are measured against it.
 uint32_t       block_us = 0;
 volatile uint16_t  over_n   = 0;
 // 8 ms of catch-up is plenty; past that the loop is not keeping up at all
 constexpr uint32_t kMaxLag  = 8;
-// Counted apart because they want different fixes: a long callback, and a
-// main loop falling behind one.
+// Counted apart: a long callback and a slow main loop want different fixes.
 volatile uint16_t  lag_n    = 0;
 volatile uint16_t  cb_max   = 0;
 uint16_t           ctl_max  = 0;
 int                strobe   = 0;
 uint32_t           over_at  = 0;
 
-// Control holds the solver, which is most of a 1 ms block, so it runs out
-// here -- but once per block, or every smoothing constant is wrong.
+// Control holds the solver, so it runs out here, but once per block exactly.
 volatile uint32_t blocks_done = 0;
 uint32_t          blocks_seen = 0;
 
-// ponytail: press logging, for why one press is loud and the next quiet.
-// Both hunts it served are closed -- delete with its prints.
+// ponytail: press logging, both hunts closed -- delete with its prints.
 volatile float    pk          = 0.0f;
 int               log_pad     = -1;
 uint32_t          log_at      = 0;
@@ -57,8 +50,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     blocks_done++;
     const uint32_t t0 = System::GetUs();
 
-    // ponytail: input mode off while the synth side is tuned. Pass `mono` to
-    // synth::Process to re-enable; the engine path and its tests are intact.
+    // ponytail: input mode off while the synth side is tuned; pass `mono` to re-enable.
     float mono[kBlock];
     for(size_t i = 0; i < size; i++)
         mono[i] = (in[0][i] + in[1][i]) * 0.5f;
@@ -77,8 +69,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
         if(m > pk)
             pk = m;
     }
-    // 90% of the budget leaves the main loop the rest; the first second is
-    // skipped with the SDRAM lines still cold.
+// 90% of the budget leaves the main loop the rest; the first second is cold.
     const uint32_t us = System::GetUs() - t0;
     if(blocks_done > 1000 && us * 10 > block_us * 9)
         over_n++;
@@ -118,8 +109,7 @@ int main()
         // Paced by the callback: it is the only accurate clock here
         while(blocks_seen != blocks_done)
         {
-            // Dropped, not caught up: grinding a backlog never finishes, and
-            // the check is inside the loop because that is when it never exits.
+            // Dropped, not caught up: grinding a backlog never finishes.
             const uint32_t lag = blocks_done - blocks_seen;
             if(lag > kMaxLag)
             {
@@ -130,8 +120,7 @@ int main()
             blocks_seen++;
             now_s += block_dt;
 
-            // Quarter rate, the two halves on different blocks to spread
-            // the work. Control cannot move off every block.
+            // Quarter rate, the halves on different blocks. Control cannot move off one.
             if((blocks_seen % panel::kPollDiv) == 0)
                 panel::PollPads();
             else if((blocks_seen % panel::kPollDiv) == 2)
@@ -164,16 +153,14 @@ int main()
             if(synth::TookBreak())
                 stutter_until = now + 200;
 
-            // Loudest envelope, so the LED follows pads and the HOLD floor
-            // alike. A block is 1 ms, so this is an 8 ms PWM period.
+            // Loudest envelope, so the LED follows pads and the HOLD floor. 8 ms PWM.
             float lv = synth::Level();
             if(now < stutter_until && ((now / 25) & 1))
                 lv = 0.0f;
             if(now < blink_until)
                 lv = 1.0f - lv;
             const int duty = (int)(lv * 8.0f + 0.5f);
-            // Cleared each second, not latched: a latch cannot tell one
-            // cold block at startup from a board that is too slow.
+            // Cleared each second: a latch cannot tell a cold start from a slow board.
             if(now - over_at >= 1000)
             {
                 strobe  = over_n >= 4 ? 1 : (lag_n >= 4 ? 2 : 0);

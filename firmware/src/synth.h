@@ -1,5 +1,4 @@
 // Pads, octave, scale, voice allocation, the knobs and the master chain.
-// Both shells drive this and add nothing of their own.
 
 #pragma once
 
@@ -16,23 +15,20 @@ void Press(int pad);
 void Release(int pad);
 // True while the pad is sounding, whether from contact or from the latch
 bool PadOn(int pad);
-// S07/S08 down: the pads held at that moment stay down. Pads pressed
-// afterwards are momentary as usual. Letting the switch go clears them.
+// S07/S08 down: the pads held at that moment stay down until it is released.
 void Latch(bool on);
 bool Latched(int pad);
-// 0..1 contact force on a held pad. Leaning past the threshold breaks the
-// pad's group, so the player can cause a break instead of waiting for one.
+// 0..1 contact force on a held pad; leaning past the threshold breaks its group.
 void  SetPressure(int pad, float p);
 float Pressure(int pad);
-// What the pad reads as resting force: a lean is measured against this
+// Resting force a lean is measured against
 float PressureRest(int pad);
 
 // Clamped to +-2 octaves. True when it moved.
 bool ShiftOctave(int delta);
 int  Octave();
 
-// P01 steps through the tunings. A change lands on the next press: pads
-// already sounding keep the pitch they were triggered with.
+// P01 steps the tunings. A change lands on the next press.
 constexpr int kScales = 4;
 void        NextScale();
 int         Scale();
@@ -48,15 +44,13 @@ const char* KnobName(int i);
 // Advance the control side. Call once per audio block.
 void Control(double now);
 
-// One block, replacing the buffers. `in` is the mono line input or null; a
-// signal on it makes the instrument an effects box, detected not switched.
+// One block, replacing the buffers. `in` is the mono line input or null.
 void Process(float* l, float* r, int n, const float* in = nullptr);
 
 // 0..1: how far the line input has taken over from the partials
 float InputMix();
 
-// 0..1, for the LED: the loudest voice's envelope, so it follows the pads,
-// the HOLD floor and the release alike
+// 0..1, for the LED: the loudest voice's envelope
 float Level();
 
 // True once per delivered break, for the LED's stutter

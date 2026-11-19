@@ -26,8 +26,7 @@ bool     pads_ok   = false;
 uint16_t pad_state = 0, last_pads = 0;
 int      blink     = 0;
 
-// Delta at full press, one number for all seven -- the MPR121 equalises the
-// electrodes at boot. 165 logged presses read 364 to 428; 400 saturates 7.
+// Delta at full press; the MPR121 equalises the electrodes. 165 presses read 364-428.
 constexpr float kMaxDelta = 400.0f;
 float pressure[synth::kPads] = {};
 int   press_turn             = 0;
@@ -87,8 +86,7 @@ void PollPads()
         return;
     pad_state = mpr.Touched();
 
-    // One electrode per poll: seven is 21 bytes of blocking I2C against the
-    // touch read's 2, and starved the loop. 28 ms a pad.
+// One electrode per poll: all seven is 21 bytes of blocking I2C and starved the loop.
     const int p = press_turn;
     press_turn  = (press_turn + 1) % synth::kPads;
     const int e = p + kFirstPad;

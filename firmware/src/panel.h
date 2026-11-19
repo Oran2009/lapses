@@ -10,26 +10,22 @@ namespace panel
 {
 constexpr int kPads = 12;
 
-// 250 Hz, the rate Synthux's own firmware uses: panel work at block rate
-// couples into the analog side as a tone. 4 ms of latency is the price.
+// 250 Hz, as Synthux's own firmware: block-rate panel work couples in as a tone.
 constexpr int kPollDiv = 4;
 
-// `poll_rate` is how often Poll will actually be called, in Hz. It sets
-// AnalogControl's slew, which is wrong by that factor if it is guessed.
+// `poll_rate` Hz: sets AnalogControl's slew, wrong by that factor if guessed.
 bool Init(daisy::DaisySeed& hw, float poll_rate);
 
-// Reads the knobs and the switches, and edge-triggers the pads into synth
+// Knobs, switches, and the pads edge-triggered into synth
 void Poll();
 
-// Separate from Poll only so the two bursts of work land on different
-// blocks instead of one bigger burst on the same one
+// Separate from Poll so the two bursts land on different blocks
 void PollPads();
 
-// False when the MPR121 did not answer at Init: every pad then reads untouched
+// False if the MPR121 never answered at Init: every pad then reads untouched
 bool PadsOk();
 
-// True once per octave or volume pad touch, for the LED blink.
-// 2 means the control was already at its end.
+// Once per octave or volume pad touch, for the LED. 2 = already at the end.
 int TakeBlink();
 
 }  // namespace panel
