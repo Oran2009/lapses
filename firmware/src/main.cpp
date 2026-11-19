@@ -15,30 +15,30 @@ constexpr int kBlock = 48;
 
 
 DaisySeed hw;
-// Double: as float32 the 1.5 ms step rounds away past 32768 s and the clock stops.
+// double: as float32 the 1.5 ms step rounds away past 32768 s
 double    now_s     = 0.0;
 float     block_dt  = 0.0f;
 uint32_t  blink_until = 0, stutter_until = 0;
 
-// 32 kHz: at 48 seven voices left the board at 96%; the band it costs is 63 dB down.
+// 32 kHz: at 48 seven voices left the board at 96%
 constexpr auto kRate = SaiHandle::Config::SampleRate::SAI_32KHZ;
-// From the rate the hardware reports: the overruns below are measured against it.
+// from the hardware's rate, which the overruns below are measured against
 uint32_t       block_us = 0;
 volatile uint16_t  over_n   = 0;
-// 8 ms of catch-up is plenty; past that the loop is not keeping up at all
+// 8 ms of catch-up; past that the loop is not keeping up
 constexpr uint32_t kMaxLag  = 8;
-// Counted apart: a long callback and a slow main loop want different fixes.
+// counted apart: a long callback and a slow loop want different fixes
 volatile uint16_t  lag_n    = 0;
 volatile uint16_t  cb_max   = 0;
 uint16_t           ctl_max  = 0;
 int                strobe   = 0;
 uint32_t           over_at  = 0;
 
-// Control holds the solver, so it runs out here, but once per block exactly.
+// most of a 1 ms block, so it runs out here, but once per block exactly
 volatile uint32_t blocks_done = 0;
 uint32_t          blocks_seen = 0;
 
-// ponytail: press logging, both hunts closed -- delete with its prints.
+// ponytail: press logging, both hunts closed -- delete with its prints
 volatile float    pk          = 0.0f;
 int               log_pad     = -1;
 uint32_t          log_at      = 0;
@@ -50,7 +50,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     blocks_done++;
     const uint32_t t0 = System::GetUs();
 
-    // ponytail: input mode off while the synth side is tuned; pass `mono` to re-enable.
+    // ponytail: input off while the synth side is tuned; pass `mono` to re-enable
     float mono[kBlock];
     for(size_t i = 0; i < size; i++)
         mono[i] = (in[0][i] + in[1][i]) * 0.5f;
@@ -69,7 +69,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
         if(m > pk)
             pk = m;
     }
-// 90% of the budget leaves the main loop the rest; the first second is cold.
+// 90% of the budget; the first second is cold
     const uint32_t us = System::GetUs() - t0;
     if(blocks_done > 1000 && us * 10 > block_us * 9)
         over_n++;
@@ -82,7 +82,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
 int main()
 {
     hw.Init();
-    // Not blocking: the instrument has to work with nothing attached
+    // not blocking: the instrument works with nothing attached
     hw.StartLog(false);
     hw.SetAudioBlockSize(kBlock);
     hw.SetAudioSampleRate(kRate);
@@ -92,7 +92,7 @@ int main()
     block_us       = (uint32_t)(block_dt * 1e6f);
     synth::Init(sr, kBlock);
 
-    // Flush denormals: every decaying tail falls into them otherwise
+    // flush denormals: every decaying tail falls into them
     {
         uint32_t fpscr;
         __asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
@@ -106,10 +106,10 @@ int main()
 
     while(1)
     {
-        // Paced by the callback: it is the only accurate clock here
+        // the callback is the only accurate clock here
         while(blocks_seen != blocks_done)
         {
-            // Dropped, not caught up: grinding a backlog never finishes.
+            // dropped, not caught up: grinding a backlog never finishes
             const uint32_t lag = blocks_done - blocks_seen;
             if(lag > kMaxLag)
             {
@@ -120,7 +120,7 @@ int main()
             blocks_seen++;
             now_s += block_dt;
 
-            // Quarter rate, the halves on different blocks. Control cannot move off one.
+            // quarter rate, the halves on different blocks
             if((blocks_seen % panel::kPollDiv) == 0)
                 panel::PollPads();
             else if((blocks_seen % panel::kPollDiv) == 2)
@@ -149,22 +149,22 @@ int main()
             if(const int b = panel::TakeBlink())
                 blink_until = now + (b == 2 ? 600 : 150);
 
-            // A break chops the LED, so what you hear has something to see
+            // a break chops the LED, so what you hear has something to see
             if(synth::TookBreak())
                 stutter_until = now + 200;
 
-            // Loudest envelope, so the LED follows pads and the HOLD floor. 8 ms PWM.
+            // loudest envelope; 8 ms PWM period
             float lv = synth::Level();
             if(now < stutter_until && ((now / 25) & 1))
                 lv = 0.0f;
             if(now < blink_until)
                 lv = 1.0f - lv;
             const int duty = (int)(lv * 8.0f + 0.5f);
-            // Cleared each second: a latch cannot tell a cold start from a slow board.
+            // cleared each second: a latch cannot tell a cold start from a slow board
             if(now - over_at >= 1000)
             {
                 strobe  = over_n >= 4 ? 1 : (lag_n >= 4 ? 2 : 0);
-                // Main loop only: each transmit blocks until the host takes it
+                // main loop only: each transmit blocks until the host takes it
                 hw.PrintLine("cb %u us over %u | ctl %u us lag %u",
                              (unsigned)cb_max, (unsigned)over_n,
                              (unsigned)ctl_max, (unsigned)lag_n);

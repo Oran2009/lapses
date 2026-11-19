@@ -15,8 +15,7 @@ namespace synth
 {
 namespace
 {
-// Chords over two octaves, not scales: 7 voices in one critical band mud up.
-// Every row >= the minor's 0.91 ERB at 220/264.
+// chords over two octaves, not scales; every row >= the minor's 0.91 ERB at 220/264
 const uint8_t kRatN[kScales][kPads] = {
     {1, 6, 3, 2, 12, 3, 4},    // just minor triad, what it has always played
     {1, 5, 3, 2, 5, 3, 4},     // the same shape, major
@@ -32,14 +31,14 @@ const uint8_t kRatD[kScales][kPads] = {
 int scale = 0;
 constexpr int kRoot = 9;   // A
 
-// A lean is a rise over the pad's own resting force, not an absolute level
+// a lean is a rise over the pad's own resting force, not a level
 constexpr float kLean    = 0.25f;   // rise over resting that counts
 constexpr float kFloor   = 0.3f;    // below this it is a brush, not a lean
-// 4.0 and not 0.8: at 0.8 rest ate the lean. Measured over 203 board presses.
+// 4.0 not 0.8: at 0.8 rest ate the lean. 203 board presses.
 constexpr float kRestUp  = 4.0f;    // seconds for rest to absorb a push
 constexpr float kRestDn  = 0.15f;   // and to follow a finger easing off
 constexpr float kRelax   = 0.10f;   // easing off this much re-arms a pad
-// Settling only: after a break the leaned-on force must not become the resting one
+// settling only: the leaned-on force must not become the resting one
 constexpr float kRestSettle = 0.05f;
 float           pressure[kPads] = {};
 float           rest[kPads]     = {};
@@ -50,9 +49,9 @@ bool            settling[kPads] = {};
 
 bool  held[kPads], latched[kPads];
 bool  latch_on = false;
-// A latched pad sounds untouched, so this and not contact is what playing means
+// latched pads sound untouched, so this and not contact means playing
 inline bool PadActive(int p) { return held[p] || latched[p]; }
-// The pitch a pad was triggered with: octave and scale changes land on the next press
+// octave and scale changes land on the next press
 float pad_hz[kPads];
 const int kPadVoice[kPads] = {0, 1, 2, 3, 4, 5, 6};
 int   octave    = 0;
@@ -69,45 +68,44 @@ float RootHz()
 
 // ------------------------------------------------------------- the master
 
-// A plate-ish FDN standing in for the prototype's 3.6 s convolution
+// plate-ish FDN for the prototype's 3.6 s convolution
 constexpr int kCombs = 4, kAps = 2;
 const int     kCombLen[kCombs] = {1687, 1801, 2053, 2251};
-// Right combs a few samples longer: decorrelating from the mono delays is the width
+// right combs a few samples longer; the decorrelation is the width
 constexpr int kSpread = 113;
 const int     kApLen[kAps]     = {389, 127};
 float SLOW_BSS comb_buf[2][kCombs][2432];
 float SLOW_BSS ap_buf[2][kAps][512];
 int            comb_i[2][kCombs], ap_i[2][kAps];
 float          comb_lp[2][kCombs];
-// 30 ms predelay: without it the allpass inversion cancels part of the dry
+// 30 ms predelay, or the allpass inversion cancels part of the dry
 constexpr int  kPre = 1440;
 float SLOW_BSS pre_buf[2][kPre];
 int            pre_i[2];
-// The line input is detected, not switched: engages on signal, releases 3 s after
+// detected, not switched: engages on signal, releases 3 s after
 float          in_env = 0.0f, in_hold = 0.0f, in_mix = 0.0f;
 
-// The reverb is fed above the mud, not through it
+// fed above the mud, not through it
 float          send_hp[2];
 float          send_hp_c = 0.0f;
-// SHIMMER on S36: its own line fed by the plate, an octave up. Not the plate
-// itself -- 28 dB comb peaks. Grained, or the comb repeats.
+// SHIMMER on S36: its own line fed by the plate, an octave up. Not the plate: 28 dB combs.
 constexpr int  kShimGrain  = 4096;   // 128 ms, the length that measured best
-// Four: triangles sum flat only at two and four, and three ripples 22%
+// triangles sum flat only at two and four; three ripples 22%
 constexpr int  kShimGrains = 4;
-// Twice the grain, so a read can be offset a whole window without wrapping
+// twice the grain, so a read can offset a whole window without wrapping
 constexpr int  kShimLen = kShimGrain * 2;
 float SLOW_BSS shim_buf[2][kShimLen];
 int            shim_wr = 0;
 float          shim_ph[kShimGrains];
 float          shim_off[kShimGrains];
 uint32_t       shim_rng = 1;
-// Every pass is another octave; at 2 kHz the second was gone and the fader read as level
+// at 2 kHz the second pass was gone and the fader read as a level
 float          shim_lp[2];
 float          shim_lp_c = 0.0f;
 float          shim_g    = 0.0f;
-// The shift is unity, so the loop is stable for any feedback under one
+// the shift is unity, so the loop is stable under feedback 1
 constexpr float kShimFb  = 0.75f;
-// Top of the fader, backed off from 4.0; at 2.0 the shimmer stops outliving the dry
+// backed off from 4.0; at 2.0 the shimmer stops outliving the dry
 constexpr float kShimIn  = 2.5f;
 
 float ShimRd(const float* b, float d)
@@ -136,9 +134,9 @@ float Verb(int ch, float x)
         float* b = comb_buf[ch][c];
         int&   i = comb_i[ch][c];
         const float y = b[i];
-        // Darkening tail as the prototype's IR has, but brighter than the hard-lowpassed loops
+        // darkening tail, but brighter than the hard-lowpassed loops
         comb_lp[ch][c] += (y - comb_lp[ch][c]) * 0.16f;
-        // 0.82 over 35..47 ms combs was a small room; this is three and a half seconds
+        // 0.82 over 35..47 ms combs was a small room; this is 3.5 s
         b[i] = x + comb_lp[ch][c] * 0.96f;
         i    = (i + 1) % (kCombLen[c] + (ch ? kSpread : 0));
         sum += y;
@@ -157,7 +155,7 @@ float Verb(int ch, float x)
     return sum;
 }
 
-// The measured peak out of the voices is about 1.0, so this only catches the breaks
+// the voices peak near 1.0, so this only catches the breaks
 float lim_env = 0.0f;
 
 float Limit(float x)
@@ -248,7 +246,7 @@ void Init(float sample_rate, int block_size)
     wfc::Init(0x5afe6a7du);
     voices::Init(sample_rate, block_size);
 
-    // HOLD floors every voice, pressed or not, so untouched ones must not sit on one default
+    // HOLD floors every voice, so untouched ones must not share one default
     for(int p = 0; p < kPads; p++)
         if(kPadVoice[p] >= 0)
             voices::SetPitch(kPadVoice[p], PadHz(p), 2.0f * RootHz(), false);
@@ -269,18 +267,18 @@ void SetPressure(int pad, float p)
     if(pad < 0 || pad >= kPads)
         return;
     pressure[pad] = p;
-    // Both shells poll every pad: without this the idle zeroes ate the reseed
+    // both shells poll every pad: the idle zeroes ate the reseed
     if(!held[pad])
     {
         rest[pad] = -1.0f;
         return;
     }
-    // A fresh press has no resting force yet: seed it, or every press reads as a lean
+    // no resting force yet: seed it, or every press reads as a lean
     if(rest[pad] < 0.0f)
     {
         rest[pad]    = p;
         rest_at[pad] = now_s;
-        // Disarmed as well as seeded: the panel's ramp made 40 presses read as 40 breaks
+        // disarmed too: the panel's ramp made 40 presses read as 40 breaks
         armed[pad]    = false;
         settling[pad] = true;
         peak[pad]     = p;
@@ -291,7 +289,7 @@ void SetPressure(int pad, float p)
     {
         if(p > peak[pad])
             peak[pad] = p;
-        // Two ways in: a fresh press arms when the seed catches up, a broken one on the relax
+        // a fresh press arms when the seed catches up, a broken one on the relax
         if(lean < kLean * 0.4f || p < peak[pad] - kRelax)
         {
             armed[pad]    = true;
@@ -306,10 +304,10 @@ void SetPressure(int pad, float p)
         if(v >= 0)
             wfc::BreakRule(-1, v / wfc::kGroupSize, 0.0f, now_s, v);
     }
-    // After the test, so a push is measured from where the finger was. 28 ms a pad.
+    // after the test, so a push is measured from where the finger was
     const float dt = (float)(now_s - rest_at[pad]);
     rest_at[pad]   = now_s;
-    // Settling only: at kRestUp the rest of the panel's ramp read as a lean for 1.5 s
+    // settling only: at kRestUp the panel's ramp read as a lean for 1.5 s
     const float up = settling[pad] ? kRestSettle : kRestUp;
     if(dt > 0.0f)
         rest[pad] += (p - rest[pad])
@@ -351,12 +349,12 @@ void Release(int pad)
     armed[pad]    = true;
     SyncSounding(now_s);
     const int v = kPadVoice[pad];
-    // A latched pad's note did not end, so there is no tail to re-roll
+    // a latched pad's note did not end, so there is no tail to re-roll
     if(v >= 0 && !latched[pad])
         wfc::RerollTail(v, now_s);
 }
 
-// S07/S08 down. Edge only: it keeps the pads held at that moment.
+// edge only: it keeps the pads held at that moment
 void Latch(bool on)
 {
     if(on == latch_on)
@@ -382,7 +380,7 @@ bool ShiftOctave(int delta)
 
 int Octave() { return octave; }
 
-// Next press only, via pad_hz above
+// next press only, via pad_hz
 void NextScale() { scale = (scale + 1) % kScales; }
 int  Scale() { return scale; }
 const char* ScaleName()
@@ -409,11 +407,11 @@ float GainDb() { return (float)gain_step * 3.0f; }
 void SetKnob(int i, float val)
 {
     float* k = &wfc::K().delay;
-    // Without a deadband the jittering ADCs rebuilt the rules a thousand times a second
+    // without a deadband the ADC jitter rebuilt the rules thousands of times a second
     if(i < 0 || i >= kKnobs || fabsf(k[i] - val) < 0.004f)
         return;
     k[i] = val;
-    // Only these reach the rules, and the rebuild is 10,000 tile pairs
+    // only these reach the rules, and a rebuild is 10,000 tile pairs
     if(i == 0 || i == 1 || i == 2)
         wfc::RebuildRules();
     wfc::KnobsMoved(now_s);
@@ -421,7 +419,7 @@ void SetKnob(int i, float val)
 
 float Knob(int i) { return (&wfc::K().delay)[i]; }
 
-// Silence costs the same to render as sound and block-rate work is audible as a tone
+// silence costs the same to render, and block-rate work is audible as a tone
 constexpr float kIdleFloor  = 1.0e-5f;   // -100 dBFS
 constexpr float kIdleHold_s = 8.0f;      // longer than the plate's 5 s tail
 int             idle_blocks = 0;
@@ -431,7 +429,7 @@ void Control(double now)
 {
     now_s = now;
     SyncSounding(now);
-    // The one place that wakes the chain. Held pads alone left the HOLD fader unable to.
+    // the one place that wakes the chain; held pads alone left HOLD unable to
     for(int v = 0; v < wfc::kVoices; v++)
         if(wfc::Sounding(v))
         {
@@ -469,7 +467,7 @@ void Process(float* l, float* r, int n, const float* in)
     }
     else
         in_hold = 0.0f;
-    // A fade, not a mix: it only ever settles at one end or the other
+    // a fade, not a mix: it settles at one end or the other
     in_mix += ((in_hold > 0.0f ? 1.0f : 0.0f) - in_mix)
               * (1.0f - expf(-(float)n / sr / 0.15f));
 
@@ -479,11 +477,11 @@ void Process(float* l, float* r, int n, const float* in)
     if(in)
         for(int i = 0; i < n; i++)
             l[i] += in[i] * in_mix * 0.5f, r[i] += in[i] * in_mix * 0.5f;
-    // Fixed, not a knob. 1.8 measured: fully wet matches fully dry, 2.2 pumped the limiter.
+    // 1.8 measured: fully wet matches fully dry, 2.2 pumped the limiter
     constexpr float kSpace = 0.3f;
     constexpr float send   = 1.8f * kSpace;
     constexpr float dry    = 1.0f - 0.8f * kSpace;
-    // A fader is swept, and stepping the regeneration once a block zippered
+    // stepping the regeneration once a block zippered
     const float sk = wfc::K().shimmer < 0.0f
                          ? 0.0f
                          : (wfc::K().shimmer > 1.0f ? 1.0f : wfc::K().shimmer);
@@ -497,7 +495,7 @@ void Process(float* l, float* r, int n, const float* in)
         float up[2] = {0.0f, 0.0f};
         for(int g = 0; g < kShimGrains; g++)
         {
-            // -1 per sample: the read advances at 2x the write rate, which is the octave
+            // -1 per sample: the read advances at 2x the write rate, the octave
             shim_ph[g] -= 1.0f;
             if(shim_ph[g] < 0.0f)
             {
@@ -506,14 +504,14 @@ void Process(float* l, float* r, int n, const float* in)
                 shim_off[g] = (float)(shim_rng >> 19) * (float)kShimGrain
                               / 8192.0f;
             }
-            // Triangle, not equal power: the gains must sum to 1, or the window is gain
+            // triangle, not equal power: the gains must sum to 1
             const float w = 1.0f - fabsf(shim_ph[g] - kShimGrain * 0.5f)
                                        / (kShimGrain * 0.5f);
             const float d = shim_ph[g] + shim_off[g];
             for(int c = 0; c < 2; c++)
                 up[c] += ShimRd(shim_buf[c], d) * w;
         }
-        // Staggered triangles sum flat, to half their count
+        // staggered triangles sum flat, to half their count
         for(int c = 0; c < 2; c++)
             shim_lp[c] += (up[c] * (2.0f / kShimGrains) - shim_lp[c])
                           * shim_lp_c;

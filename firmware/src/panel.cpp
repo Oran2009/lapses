@@ -26,7 +26,7 @@ bool     pads_ok   = false;
 uint16_t pad_state = 0, last_pads = 0;
 int      blink     = 0;
 
-// Delta at full press; the MPR121 equalises the electrodes. 165 presses read 364-428.
+// delta at full press; 165 presses read 364-428
 constexpr float kMaxDelta = 400.0f;
 float pressure[synth::kPads] = {};
 int   press_turn             = 0;
@@ -58,7 +58,7 @@ bool Init(DaisySeed& hw, float poll_rate)
     pads_ok                = mpr.Init(mcfg) == Mpr121I2C::Result::OK;
     if(pads_ok)
     {
-        // Only the registers that differ from what Init just wrote
+        // only the registers that differ from Init's
         static const uint8_t kReg[][2] = {
             {0x30, 0x01},   // NHDF   falling filter delta
             {0x31, 0x10},   // NCLF   16 samples before the baseline falls
@@ -86,7 +86,7 @@ void PollPads()
         return;
     pad_state = mpr.Touched();
 
-// One electrode per poll: all seven is 21 bytes of blocking I2C and starved the loop.
+// one electrode per poll: all seven is 21 bytes of blocking I2C
     const int p = press_turn;
     press_turn  = (press_turn + 1) % synth::kPads;
     const int e = p + kFirstPad;
@@ -99,7 +99,7 @@ void PollPads()
         const int delta = base > filt ? base - filt : 0;
         if(delta >= 6)
         {
-            // Squared, so the top of the range is somewhere you lean to reach
+            // squared, so the top of the range is somewhere you lean to reach
             const float n = (float)(delta - 5) / (kMaxDelta - 5.0f);
             target        = n > 1.0f ? 1.0f : n * n;
         }
@@ -126,7 +126,7 @@ void Poll()
     static const int kKnobOf[kAnalog] = {4, 1, 0, 2, 3, 8, 9, 7};
     for(int i = 0; i < kAnalog; i++)
         synth::SetKnob(kKnobOf[i], analog[i].Value());
-    // S07/S08 up freezes the solver, down latches the pads
+    // S07/S08 up freezes the solver, down latches
     const int sa = switch_a.Read();
     synth::Freeze(sa == Switch3::POS_UP);
     synth::Latch(sa == Switch3::POS_DOWN);
