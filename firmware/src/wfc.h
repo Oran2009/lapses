@@ -131,8 +131,8 @@ bool Broke();
 int  ShownMod(int v);
 int  ShownSkew(int v);
 
-// when an event lands; kind 2 = break, 1 = repair. reading clears it
-int  Flash(int v);
+// once per break on this voice. reading clears it
+bool Broke(int v);
 
 // ----------------------------------------------------------------- the work
 

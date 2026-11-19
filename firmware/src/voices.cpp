@@ -187,8 +187,6 @@ struct Voice
     float    lvl_sum;          // |loop| over the last block
     int      lvl_n;
     float    out_lvl;          // and the finished value, for the duck
-    // loudest sample on the bus
-    float    pk;
     // tap at the last block's end; -1 unset
     float    ds_p, ds2_p;
     // what Process resolved, for the display
@@ -339,7 +337,7 @@ void Init(float sample_rate, int block_size)
         vo.xf = vo.xf_t = 0.0f;
         vo.pre = vo.pre_t = 1.0f;
         vo.mspeed = vo.mspeed_t = 0.5f;
-        vo.fast = vo.slow = vo.lvl_sum = vo.out_lvl = vo.pk = 0.0f;
+        vo.fast = vo.slow = vo.lvl_sum = vo.out_lvl = 0.0f;
         // or seven voices move as one
         vo.frate     = 0.54f;
         vo.mod_ph    = (uint32_t)(Rand() * 4294967296.0f);
@@ -405,13 +403,6 @@ float Pan(int i) { return v[i].pan_now; }
 float LoopLevel(int i) { return v[i].fast; }
 float OutGain(int i) { return v[i].outg; }
 float BusLvl(int i) { return v[i].out_lvl * v[i].wet * v[i].outg; }
-float Peak(int i)
-{
-    const float p = v[i].pk;
-    v[i].pk       = 0.0f;
-    return p;
-}
-
 float DryLift(int i) { return v[i].dryl; }
 
 float Level()
@@ -557,7 +548,7 @@ void Control(double now, float dt)
         vo.depth_now = dpe;
 
         // gain and drive snap, the delay crawls
-        if(wfc::Flash(i) == 2)
+        if(wfc::Broke(i))
         {
             vo.sweep = kSweepT;
             vo.fb    = vo.fb_t;
@@ -820,9 +811,6 @@ void Process(float* out_l, float* out_r, int n)
             // one tap per channel
             const float mix = dry * vo.dryl;
             const float cl = (mix + pst * vo.wet) * vo.pan_l * vo.outg;
-            const float ca = cl < 0.0f ? -cl : cl;
-            if(ca > vo.pk)
-                vo.pk = ca;
             l += cl;
             r += (mix + pst2 * vo.wet) * vo.pan_r * vo.outg;
             dsamp[i] += dsampi[i];

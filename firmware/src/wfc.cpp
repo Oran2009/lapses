@@ -60,7 +60,7 @@ int32_t seq = 0;
 
 bool  sounding[kVoices];
 double started_at[kVoices];
-int   flash[kVoices];
+bool  broke_v[kVoices];
 // on delivery, so the LED tracks the sound
 bool  broke = false;
 
@@ -528,7 +528,7 @@ void Init(uint32_t seed)
         seq_tile[v] = seq_mod[v] = seq_skew[v] = 0;
         sounding[v]                                           = false;
         started_at[v]                                         = 0;
-        flash[v]                                              = 0;
+        broke_v[v]                                            = false;
     }
     seq       = 0;
     broke     = false;
@@ -570,11 +570,11 @@ int ShownTile(int v) { return shown_tile[v]; }
 int ShownMod(int v) { return shown_mod[v]; }
 int ShownSkew(int v) { return shown_skew[v]; }
 
-int Flash(int v)
+bool Broke(int v)
 {
-    const int f = flash[v];
-    flash[v]    = 0;
-    return f;
+    const bool b = broke_v[v];
+    broke_v[v]   = false;
+    return b;
 }
 
 // ----------------------------------------------------------------- the work
@@ -832,10 +832,8 @@ void Tick(double now)
             seq_mod[e.v]   = e.seq;
             shown_mod[e.v] = (int8_t)e.ch.mod;
         }
-        if(e.kind > flash[e.v])
-            flash[e.v] = e.kind;
         if(e.kind == 2)
-            broke = true;
+            broke = broke_v[e.v] = true;
     }
     n_events = keep;
 
