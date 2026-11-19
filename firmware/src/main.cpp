@@ -44,10 +44,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     blocks_done++;
     const uint32_t t0 = System::GetUs();
 
-    float mono[kBlock];
-    for(size_t i = 0; i < size; i++)
-        mono[i] = (in[0][i] + in[1][i]) * 0.5f;
-    (void)mono;
 
     float l[kBlock], r[kBlock];
     synth::Process(l, r, (int)size);

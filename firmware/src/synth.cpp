@@ -81,8 +81,6 @@ float          comb_lp[2][kCombs];
 constexpr int  kPre = 1440;
 float SLOW_BSS pre_buf[2][kPre];
 int            pre_i[2];
-// detected, not switched
-float          in_env = 0.0f, in_hold = 0.0f, in_mix = 0.0f;
 
 // fed above the mud
 float          send_hp[2];
@@ -235,7 +233,6 @@ void Init(float sample_rate, int block_size)
     shim_rng  = 1;
     shim_g    = 0.0f;
     shim_lp_c = 1.0f - expf(-2.0f * 3.14159265f * 6000.0f / sr);
-    in_env = in_hold = in_mix = 0.0f;
     send_hp_c = 1.0f - expf(-2.0f * 3.14159265f * 180.0f / sr);
     lim_env = 0.0f;
 
@@ -440,40 +437,13 @@ void Control(double now)
         wfc::SetLevel(v, voices::BusLvl(v));
 }
 
-float InputMix() { return in_mix; }
-
-void Process(float* l, float* r, int n, const float* in)
+void Process(float* l, float* r, int n)
 {
-    if(idle && !in)
-    {
-        for(int i = 0; i < n; i++)
-            l[i] = r[i] = 0.0f;
-        return;
-    }
-
-    if(in)
-    {
-        float peak = 0.0f;
-        for(int i = 0; i < n; i++)
-            if(fabsf(in[i]) > peak)
-                peak = fabsf(in[i]);
-        in_env += (peak - in_env) * (peak > in_env ? 0.5f : 0.02f);
-        const float dt = (float)n / sr;
-        in_hold = in_env > 0.003f ? 3.0f
-                                  : (in_hold > dt ? in_hold - dt : 0.0f);
-    }
-    else
-        in_hold = 0.0f;
-    // a fade, not a mix
-    in_mix += ((in_hold > 0.0f ? 1.0f : 0.0f) - in_mix)
-              * (1.0f - expf(-(float)n / sr / 0.15f));
-
     for(int i = 0; i < n; i++)
         l[i] = r[i] = 0.0f;
-    voices::Process(l, r, n, in, in_mix);
-    if(in)
-        for(int i = 0; i < n; i++)
-            l[i] += in[i] * in_mix * 0.5f, r[i] += in[i] * in_mix * 0.5f;
+    if(idle)
+        return;
+    voices::Process(l, r, n);
     // fully wet matches fully dry
     constexpr float kSpace = 0.3f;
     constexpr float send   = 1.8f * kSpace;

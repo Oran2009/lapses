@@ -44,11 +44,9 @@ const char* KnobName(int i);
 // advance the control side, once per audio block
 void Control(double now);
 
-// one block, replacing the buffers. `in` is the mono line input or null.
-void Process(float* l, float* r, int n, const float* in = nullptr);
+// one block, replacing the buffers
+void Process(float* l, float* r, int n);
 
-// 0..1: how far the line input has taken over
-float InputMix();
 
 // 0..1 for the LED: the loudest envelope
 float Level();

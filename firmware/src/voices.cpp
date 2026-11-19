@@ -17,46 +17,12 @@ namespace
 constexpr int kPartials = 8;
 
 
-// the loop snaps to whole periods, so noise pitches
-struct Model
-{
-    const char* name;
-    float ratio[kPartials];   // partial frequencies, times the pitch
-    float amp[kPartials];     // and their levels
-    float rolloff;   // spectral tilt
-    float tone;      // partials into the line
-    float noise;     // noise beside them
-    float drive;     // before the line, not inside
-    float motion;    // re-roll rate
-    float cents;     // wander
-    float dly_mul;   // loop length
-    float damp;      // loop lowpass
-    float atk;       // the VCA's speed
-    float out;       // VCA level, so the three audition matched
-};
-
-constexpr Model kModel[kModels] = {
-    // 0. as it was: six harmonics, two unisons
-    {"as-is",
-     {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 1.0f, 2.0f},
-     {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.45f, 0.45f},
-     1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.6f, 1.0f, 1.0f, 1.0f, 1.00f},
-
-    // 1. organism: short body, drive ahead of the line, beating pairs
-    {"organism",
-     {1.0f, 1.007f, 2.0f, 2.013f, 3.0f, 3.02f, 1.5f, 4.5f},
-     {1.0f, 0.9f, 0.8f, 0.7f, 0.55f, 0.45f, 0.5f, 0.3f},
-     0.55f, 0.85f, 0.03f, 0.75f, 6.0f, 10.0f, 0.10f, 2.2f, 1.0f, 0.29f},
-
-    // 2. deep: sub-octave partials, long dark body
-    {"deep",
-     {0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 0.5f, 1.0f},
-     {1.0f, 0.9f, 0.5f, 0.4f, 0.2f, 0.12f, 0.6f, 0.4f},
-     1.6f, 0.75f, 0.22f, 0.2f, 0.6f, 6.0f, 1.7f, 0.35f, 0.5f, 0.49f},
-};
-
-int cur_model = 0;
-inline const Model& M() { return kModel[cur_model]; }
+constexpr float kRatio[kPartials] = {1.0f, 2.0f, 3.0f, 4.0f,
+                                     5.0f, 6.0f, 1.0f, 2.0f};
+constexpr float kAmp[kPartials]   = {1.0f, 1.0f, 1.0f, 1.0f,
+                                     1.0f, 1.0f, 0.45f, 0.45f};
+// cents a re-roll
+constexpr float kWander = 1.6f;
 
 // what drives the mod; all three destinations move
 enum
@@ -236,7 +202,6 @@ struct Voice
     bool     dly_jump;
     // sixteen powf calls are not free
     float    pf_hz;
-    int      pf_model;
     float    pf_ref;
     // tilt reference; travels with the voice
     float    ref;
@@ -297,24 +262,21 @@ void Recoeff(float dt, float glide)
 void SetPartialFreqs(Voice& vo, bool snap)
 {
     // shallower for low notes
-    const bool relevel = snap || vo.pf_hz != vo.hz || vo.pf_model != cur_model
-                         || vo.pf_ref != vo.ref;
+    const bool relevel = snap || vo.pf_hz != vo.hz || vo.pf_ref != vo.ref;
     if(relevel)
     {
         // the chord's root, not 440: hardwired cost overtones
         const float tilt
-            = Clamp(1.9f - 1.5f * logf(vo.ref / vo.hz) * 1.442695f, 0.55f, 1.9f)
-              * M().rolloff;
+            = Clamp(1.9f - 1.5f * logf(vo.ref / vo.hz) * 1.442695f, 0.55f, 1.9f);
         for(int k = 0; k < kPartials; k++)
-            vo.p[k].base = powf(M().ratio[k], -tilt) * M().amp[k];
+            vo.p[k].base = powf(kRatio[k], -tilt) * kAmp[k];
         vo.pf_hz    = vo.hz;
-        vo.pf_model = cur_model;
         vo.pf_ref   = vo.ref;
     }
     for(int k = 0; k < kPartials; k++)
     {
         Partial&    p  = vo.p[k];
-        const float kk = M().ratio[k];
+        const float kk = kRatio[k];
         // so the partials beat rather than lock
         const float f  = vo.hz * kk * (1.0f + 0.00015f * kk * kk);
         // two terms are good to a twentieth of a cent here
@@ -414,26 +376,9 @@ void Init(float sample_rate, int block_size)
     Recoeff((float)block * inv_sr, wfc::DelayGlide());
 }
 
-// SPIKE: the voice worlds
 void SetModMode(int m) { mod_mode = m >= 0 && m <= kModLfo ? m : kModFollow; }
 int  ModMode() { return mod_mode; }
 
-void SetModel(int m)
-{
-    m = m >= 0 && m < kModels ? m : 0;
-    // idempotent: re-deriving is a click
-    if(m == cur_model)
-        return;
-    cur_model = m;
-    // the spectrum changes shape, so re-derive
-    for(int i = 0; i < wfc::kVoices; i++)
-        SetPartialFreqs(v[i], true);
-}
-int         Model_() { return cur_model; }
-const char* ModelName(int m)
-{
-    return m >= 0 && m < kModels ? kModel[m].name : "?";
-}
 
 void SetPitch(int i, float hz, float ref, bool snap)
 {
@@ -555,14 +500,13 @@ void Control(double now, float dt)
             Partial& p = vo.p[k];
             if(now > p.next)
             {
-                const float mo = M().motion;
-                p.walk  = Clamp(p.walk + Rnd() * M().cents,
-                                -10.0f * M().cents, 10.0f * M().cents);
+                p.walk  = Clamp(p.walk + Rnd() * kWander,
+                                -10.0f * kWander, 10.0f * kWander);
                 p.det_t = p.det_base + p.walk;
                 p.lvl_t = p.base * (1.0f - 0.51f * Rand());
-                p.det_c = Coeff(2.5f / mo, dt);
-                p.lvl_c = Coeff((1.2f + Rand() * 2.0f) / mo, dt);
-                p.next  = now + (double)((0.8f + Rand() * 2.0f) / mo);
+                p.det_c = Coeff(2.5f, dt);
+                p.lvl_c = Coeff(1.2f + Rand() * 2.0f, dt);
+                p.next  = now + (double)(0.8f + Rand() * 2.0f);
             }
             Approach(p.det, p.det_t, p.det_c);
             Approach(p.lvl, p.lvl_t, p.lvl_c);
@@ -573,7 +517,7 @@ void Control(double now, float dt)
         const float feff
             = Clamp((on ? F : (F < 0.75f ? F : 0.75f)) * fbm, 0.0f, 1.3f);
         // snapped to whole periods: inaudible, but free
-        const float t0 = base * D * M().dly_mul * (skew ? wfc::kSkew : 1.0f);
+        const float t0 = base * D * (skew ? wfc::kSkew : 1.0f);
         float       d  = skew ? t0 : floorf(t0 * vo.hz + 0.5f) / vo.hz;
         if(!skew && d * vo.hz < 1.0f)
             d = 1.0f / vo.hz;
@@ -587,7 +531,7 @@ void Control(double now, float dt)
         }
         vo.dly_t  = dly;
         vo.fb_t   = feff;
-        vo.lcut_t = lcut * M().damp;
+        vo.lcut_t = lcut;
         vo.pre_t  = pre;
         vo.wet_t  = 0.8f * sqrtf(pre) * 0.7f;
         vo.outg_t = 1.0f - duck[i] * duck[i] * (1.0f - room[i]);
@@ -625,7 +569,7 @@ void Control(double now, float dt)
         Approach(vo.wet, vo.wet_t, co.wet);
         Approach(vo.outg, vo.outg_t, co.wet);
         Approach(vo.dryl, vo.dryl_t, co.wet);
-        Approach(vo.vca, vo.vca_t, Clamp(co.vca * M().atk, 0.0f, 1.0f));
+        Approach(vo.vca, vo.vca_t, Clamp(co.vca, 0.0f, 1.0f));
         Approach(vo.vcut, vo.vcut_t, co.vcut);
         Approach(vo.mspeed, vo.mspeed_t, co.mod_speed);
         Approach(vo.m_dly, vo.m_dly_t, co.mod_depth);
@@ -751,8 +695,7 @@ inline float Rd(const float* line, int wr, float d)
     return line[i0] + (line[i1] - line[i0]) * fr;
 }
 
-void Process(float* out_l, float* out_r, int n, const float* in,
-             float in_mix)
+void Process(float* out_l, float* out_r, int n)
 {
     Approach(link_g, Clamp(wfc::K().link, 0.0f, 1.0f),
              Coeff(0.05f, (float)n * inv_sr));
@@ -828,17 +771,7 @@ void Process(float* out_l, float* out_r, int n, const float* in,
                 src += SinQ(vo.p[k].phase) * vo.p[k].lvl;
                 vo.p[k].phase += vo.p[k].inc;
             }
-            src *= 0.3f * M().tone;
-            // before the filter, so both it and the loop shape it
-            if(M().noise != 0.0f)
-                src += Rnd() * M().noise;
-            // dirties the source, not the echoes
-            if(M().drive != 0.0f)
-                src = Shape(src * (1.0f + 8.0f * M().drive));
-            src *= M().out;
-            // so the fade back is in phase
-            if(in)
-                src = src * (1.0f - in_mix) + in[s] * in_mix * 0.5f;
+            src *= 0.3f;
 
             const float dry = vo.vlp.Process(src) * vo.vca;
 
@@ -885,7 +818,7 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             const float pst2 = Shape((lp2 - vo.loop_hp2) * preg[i]) * postg[i];
 
             // panning it opposite pulled the centre
-            const float mix = dry * (1.0f - in_mix) * vo.dryl;
+            const float mix = dry * vo.dryl;
             const float cl = (mix + pst * vo.wet) * vo.pan_l * vo.outg;
             const float ca = cl < 0.0f ? -cl : cl;
             if(ca > vo.pk)

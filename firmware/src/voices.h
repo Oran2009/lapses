@@ -10,11 +10,6 @@ namespace voices
 // 2 s at 48 kHz; the delay clamps to 1.9 s
 constexpr int kDelayMax = 96000;
 
-// SPIKE: three voice baselines, GUI only; 0 is the voice as it was
-constexpr int kModels = 3;
-void        SetModel(int m);
-int         Model_();
-const char* ModelName(int m);
 
 // S09/S10 picks what drives the mod: 0 steps, 1 follower, 2 LFO
 void SetModMode(int m);
@@ -36,9 +31,8 @@ void SetPadHeld(int v, bool on);
 // HOLD is floating this voice above silence, so the solver must count it
 bool HoldSustains(int v);
 
-// adds into out_l/out_r; `in_mix` fades partials to `in`
-void Process(float* out_l, float* out_r, int n, const float* in = nullptr,
-             float in_mix = 0.0f);
+// adds into out_l/out_r, which must already hold the dry bus
+void Process(float* out_l, float* out_r, int n);
 
 // 0..1 envelope; the pad allocator prefers the quietest voice
 float Amp(int v);
