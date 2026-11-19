@@ -61,7 +61,7 @@ inline bool PadActive(int p) { return held[p] || latched[p]; }
 float pad_hz[kPads];
 const int kPadVoice[kPads] = {0, 1, 2, 3, 4, 5, 6};
 int   octave    = 0;
-int   gain_step = -4;   // -12 dB, safe for headphones
+int   gain_step = 0;    // 0 dB, the cap: -12 was four presses short in use.
 float gain_lin  = 1.0f;
 float sr        = 48000.0f;
 int   block     = 48;
