@@ -201,7 +201,6 @@ struct Voice
 
     Svf vlp, llp, llp2;   // llp2 is the side tap's, so both channels match
 
-    // The delay line, written and read once a sample
     float* line;
     int    wr;
 
@@ -443,7 +442,6 @@ const char* ModelName(int m)
 void SetPitch(int i, float hz, float ref, bool snap)
 {
     v[i].ref = ref > 0.0f ? ref : 2.0f * hz;
-    // Braced: the indentation claimed all four, only the first was inside
     if(snap)
     {
         v[i].fresh = 1.0f;
@@ -465,7 +463,6 @@ float ModDepth(int i) { return v[i].depth_now; }
 float Pan(int i) { return v[i].pan_now; }
 float LoopLevel(int i) { return v[i].fast; }
 float OutGain(int i) { return v[i].outg; }
-// What this voice is actually putting on the bus, as the duck sees it
 float BusLvl(int i) { return v[i].out_lvl * v[i].wet * v[i].outg; }
 float TakePeak(int i)
 {
@@ -549,7 +546,6 @@ void Control(double now, float dt)
             Approach(vo.amp, tgt, Coeff(tau, dt));
         }
 
-        // What the wave has actually delivered to this voice
         const int   tile = wfc::ShownTile(i);
         const int   lo   = wfc::ShownMod(i);
         const bool  skew = wfc::ShownSkew(i) != 0;
@@ -627,7 +623,6 @@ void Control(double now, float dt)
             vo.fb    = vo.fb_t;
             vo.pre   = vo.pre_t;
         }
-        // The tap itself moves in AdvanceTaps, once per rendered block.
         Approach(vo.fb, vo.fb_t, co.fb);
         Approach(vo.lcut, vo.lcut_t, co.lcut);
         Approach(vo.pre, vo.pre_t, co.pre);
@@ -674,7 +669,6 @@ void Control(double now, float dt)
             Approach(vo.mod, vo.step_t, Coeff(0.03f, dt));
         }
 
-        // Where the voice is, drifting slowly
         vo.pan_ph += vo.pan_inc;
         const float pan = Clamp(vo.pan_base + SinQ(vo.pan_ph) * 0.32f,
                                 -1.0f, 1.0f);
@@ -823,7 +817,6 @@ void Process(float* out_l, float* out_r, int n, const float* in,
     for(int s = 0; s < n; s++)
     {
         float l = 0.0f, r = 0.0f;
-        // What the link put out last sample, and what the voices put in this one
         const float lpv  = link_prev;
         float       lsum = 0.0f;
         // Captured first, so every feedback tap this sample reads the same previous output
@@ -853,7 +846,6 @@ void Process(float* out_l, float* out_r, int n, const float* in,
             if(in)
                 src = src * (1.0f - in_mix) + in[s] * in_mix * 0.5f;
 
-            // The voice itself, before its line
             const float dry = vo.vlp.Process(src) * vo.vca;
 
             // Into the line: the voice, its own feedback, and whatever is in the link
@@ -883,7 +875,6 @@ void Process(float* out_l, float* out_r, int n, const float* in,
 
             vo.wr           = vo.wr + 1 >= kDelayMax ? 0 : vo.wr + 1;
 
-            // The loop's filters and its distortion
             const float lp  = vo.llp.Process(outm);
             vo.loop_hp += (lp - vo.loop_hp) * loop_hp_c;
             const float f   = lp - vo.loop_hp;
@@ -913,7 +904,6 @@ void Process(float* out_l, float* out_r, int n, const float* in,
         }
         if(lact)
         {
-            // Write then read, exactly as a voice's own line does
             link_mem[link_wr] = lsum * kLinkSend + kLinkFb * link_prev;
             const float co = Rd(link_mem, link_wr, kLinkDly * sr);
             link_wr        = link_wr + 1 >= kDelayMax ? 0 : link_wr + 1;

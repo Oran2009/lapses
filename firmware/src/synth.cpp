@@ -110,7 +110,6 @@ constexpr float kShimFb  = 0.75f;
 // Top of the fader, backed off from 4.0; at 2.0 the shimmer stops outliving the dry
 constexpr float kShimIn  = 2.5f;
 
-// One interpolated read, samples behind the write head
 float ShimRd(const float* b, float d)
 {
     const int   di = (int)d;
@@ -178,7 +177,6 @@ double now_s = 0.0;
 bool  user_freeze = false;
 
 
-// Pushes every pad's sounding state into WFC, which is what the rules read
 void SyncSounding(double now)
 {
     for(int p = 0; p < kPads; p++)
@@ -451,7 +449,6 @@ float InputMix() { return in_mix; }
 
 void Process(float* l, float* r, int n, const float* in)
 {
-    // Still asleep: the buffers the caller gets are the silence it asked for
     if(idle && !in)
     {
         for(int i = 0; i < n; i++)
@@ -479,7 +476,6 @@ void Process(float* l, float* r, int n, const float* in)
     for(int i = 0; i < n; i++)
         l[i] = r[i] = 0.0f;
     voices::Process(l, r, n, in, in_mix);
-    // The input's own path to the bus, once, centred
     if(in)
         for(int i = 0; i < n; i++)
             l[i] += in[i] * in_mix * 0.5f, r[i] += in[i] * in_mix * 0.5f;

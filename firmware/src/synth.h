@@ -70,7 +70,6 @@ bool Frozen();
 
 // Which voice each pad is driving, -1 for none (for the display)
 int PadVoice(int pad);
-// Meaningless for kConnectorPad: it drives no voice
 float PadHz(int pad);
 
 }  // namespace synth

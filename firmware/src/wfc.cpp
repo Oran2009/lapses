@@ -401,7 +401,6 @@ int ApplyWave(const Change* ch, const int* order, int n, int kind,
 
 // ------------------------------------------------------------- the choosing
 
-// New settings are drawn evenly from whatever the rules currently allow
 int RandomTile()
 {
     EnsureTables();
@@ -445,8 +444,6 @@ float DelayBase() { return 0.03f * powf(30.0f, knob.delay); }
 float DelayGlide() { return Clamp(DelayBase() * 0.6f, 0.02f, 0.5f); }
 // 20 ms is one event to the ear, 800 ms is a procession you can count
 float HopSeconds() { return Lerp(0.02f, 0.8f, ripple); }
-// Below this a break stays in the group that caused it
-constexpr float kSpread = 0.45f;
 void  SetRipple(float r) { ripple = Clamp(r, 0.0f, 1.0f); }
 void  SetLevel(int v, float l)
 {
@@ -606,7 +603,6 @@ void Pass(int v, double now)
     if(!InList(act, n, v))
         act[n++] = v;
 
-    // The pressed voice changes first, then the others, newest first
     int order[kVoices], no = 0;
     order[no++] = v;
     {
@@ -803,7 +799,7 @@ void BreakRule(int type, int g, float offset, double now, int prefer)
                     = MkTile(TileD(tb), TileF(tb) < 2 ? TileF(tb) : 2, 3);
             break;
     }
-    // A break onto the tile the voice already holds is never delivered: force a real move
+    // ApplyWave reports 0 when no voice moved: reroll, or the lean is silent
     if(ApplyWave(ch, order, n, 2, offset, now) == 0)
     {
         for(int i = 0; i < kVoices; i++)
@@ -814,18 +810,7 @@ void BreakRule(int type, int g, float offset, double now, int prefer)
         ch[a].tile = t;
         ApplyWave(ch, order, n, 2, offset, now);
     }
-    // WFC comes back for it, but not straight away
     heal_at[g] = now + offset + 3.0f + Rand() * 4.0f;
-
-    // Past half way a break carries into the other group a wave later; the guard stops a loop
-    static bool spreading = false;
-    if(ripple >= kSpread && !spreading && kGroups > 1)
-    {
-        spreading = true;
-        const float after = offset + (float)n * HopSeconds();
-        BreakRule(-1, g ^ 1, after, now, -1);
-        spreading = false;
-    }
 }
 
 void BreakRule(int type, float offset, double now)
