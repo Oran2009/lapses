@@ -1,6 +1,5 @@
 // Picks each sounding voice's delay/feedback/drive tile and mod, consistent
 // under five rules. A knob scales what its rule reads, loading it till it breaks.
-// Ported from docs/safeguard-v3.html, the behavioural source of truth.
 
 #pragma once
 
