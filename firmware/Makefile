@@ -1,14 +1,11 @@
-# The Touch 2 build. From the repo root: make daisy
+# The Touch 2 build: make, from this directory.
 #
-# libDaisy and DaisySP are shared with the old project rather than copied, so
-# there is one toolchain to keep current. Override on the command line if they
-# move: make daisy LIBDAISY_DIR=... DAISYSP_DIR=...
+# libDaisy and DaisySP are not vendored. Override if they move:
+# make LIBDAISY_DIR=... DAISYSP_DIR=...
 
 TARGET = lapses
 
-# Internal flash, so no Daisy bootloader is needed on the board. -O3 puts it
-# over the 128 KB; -O2 lands at 86%. The 1.5 MB of delay lines is SDRAM either
-# way.
+# Internal flash, no bootloader on the board. -O3 overflows the 128 KB; -O2 is 86%.
 APP_TYPE = BOOT_NONE
 
 OPT = -O2
