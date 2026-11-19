@@ -265,7 +265,7 @@ void SetPartialFreqs(Voice& vo, bool snap)
     const bool relevel = snap || vo.pf_hz != vo.hz || vo.pf_ref != vo.ref;
     if(relevel)
     {
-        // the chord's root, not 440: hardwired cost overtones
+        // the chord's root, not 440
         const float tilt
             = Clamp(1.9f - 1.5f * logf(vo.ref / vo.hz) * 1.442695f, 0.55f, 1.9f);
         for(int k = 0; k < kPartials; k++)
@@ -405,7 +405,7 @@ float Pan(int i) { return v[i].pan_now; }
 float LoopLevel(int i) { return v[i].fast; }
 float OutGain(int i) { return v[i].outg; }
 float BusLvl(int i) { return v[i].out_lvl * v[i].wet * v[i].outg; }
-float TakePeak(int i)
+float PopPeak(int i)
 {
     const float p = v[i].pk;
     v[i].pk       = 0.0f;
@@ -557,7 +557,7 @@ void Control(double now, float dt)
         vo.depth_now = dpe;
 
         // gain and drive snap, the delay crawls
-        if(wfc::TakeFlash(i) == 2)
+        if(wfc::PopFlash(i) == 2)
         {
             vo.sweep = kSweepT;
             vo.fb    = vo.fb_t;
@@ -591,7 +591,7 @@ void Control(double now, float dt)
         }
         else if(mod_mode == kModLfo)
         {
-            // geared down: straight across read as an LFO
+            // geared down
             constexpr float kLfoGear = 0.1f;
             vo.mod_ph += (uint32_t)(vo.frate * kLfoGear * dt * 4294967296.0f);
             vo.mod = SinQ(vo.mod_ph);
@@ -788,7 +788,7 @@ void Process(float* out_l, float* out_r, int n)
                 const float nv = Rd(vo.line, vo.wr, dsampn[i]);
                 const float wv = Rd(vo.line, vo.wr, dsampn[i] * 1.013f);
                 const float ov = Rd(vo.line, vo.wr, dsamp2[i]);
-                // sin/cos was 12 libm calls a sample
+                // sqrt, not sin/cos
                 const float x  = xf[i] > 1.0f ? 1.0f : xf[i];
                 const float ga = sqrtf(1.0f - x), gb = sqrtf(x);
                 outm           = out * ga + nv * gb;
@@ -812,12 +812,12 @@ void Process(float* out_l, float* out_r, int n)
             vo.lvl_sum += pst < 0.0f ? -pst : pst;
             vo.lvl_n++;
 
-            // unfiltered it went dirty
+            // its own copy of the loop's filters
             const float lp2 = vo.llp2.Process(o2);
             vo.loop_hp2 += (lp2 - vo.loop_hp2) * loop_hp_c;
             const float pst2 = Shape((lp2 - vo.loop_hp2) * preg[i]) * postg[i];
 
-            // panning it opposite pulled the centre
+            // one tap per channel
             const float mix = dry * vo.dryl;
             const float cl = (mix + pst * vo.wet) * vo.pan_l * vo.outg;
             const float ca = cl < 0.0f ? -cl : cl;

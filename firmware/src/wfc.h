@@ -127,12 +127,12 @@ int  Skew(int v);
 // what the audio has reached; the wave arrives over time
 int  ShownTile(int v);
 // once per delivered break, for the LED
-bool TookBreak();
+bool PopBreak();
 int  ShownMod(int v);
 int  ShownSkew(int v);
 
 // when an event lands; kind 2 = break, 1 = repair
-int  TakeFlash(int v);
+int  PopFlash(int v);
 
 // ----------------------------------------------------------------- the work
 

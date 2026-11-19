@@ -52,7 +52,7 @@ void Process(float* l, float* r, int n);
 float Level();
 
 // once per delivered break, for the LED's stutter
-bool TookBreak();
+bool PopBreak();
 
 // output trim in 3 dB steps, 0 to -30 dB; true when it moved
 bool ShiftGain(int delta);

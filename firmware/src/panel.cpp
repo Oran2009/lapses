@@ -86,7 +86,7 @@ void PollPads()
         return;
     pad_state = mpr.Touched();
 
-// one per poll: all seven starved the loop
+// one per poll
     const int p = press_turn;
     press_turn  = (press_turn + 1) % synth::kPads;
     const int e = p + kFirstPad;
@@ -110,11 +110,11 @@ void PollPads()
     synth::SetPressure(p, pressure[p]);
 }
 
-int TakeBlink()
+int PopBlink()
 {
-    const int was = blink;
-    blink         = 0;
-    return was;
+    const int pending = blink;
+    blink             = 0;
+    return pending;
 }
 
 void Poll()

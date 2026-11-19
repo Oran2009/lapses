@@ -117,11 +117,11 @@ int main()
             }
 
             const uint32_t now = System::GetNow();
-            if(const int b = panel::TakeBlink())
+            if(const int b = panel::PopBlink())
                 blink_until = now + (b == 2 ? 600 : 150);
 
             // a break chops the LED
-            if(synth::TookBreak())
+            if(synth::PopBreak())
                 stutter_until = now + 200;
 
             // 8 ms PWM period

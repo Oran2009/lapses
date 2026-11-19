@@ -49,7 +49,7 @@ float LoopLevel(int v);
 float OutGain(int v);
 float BusLvl(int v);   // what it is putting on the bus right now
 // loudest sample on the bus since the last call
-float TakePeak(int v);
+float PopPeak(int v);
 // extra dry a fresh voice sends before its loop has filled
 float DryLift(int v);
 

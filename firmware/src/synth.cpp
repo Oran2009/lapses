@@ -298,7 +298,7 @@ void SetPressure(int pad, float p)
         if(v >= 0)
             wfc::BreakRule(-1, v / wfc::kGroupSize, 0.0f, now_s, v);
     }
-    // after the test: measured from where the finger was
+    // after the test, so a push is measured from where the finger was
     const float dt = (float)(now_s - rest_at[pad]);
     rest_at[pad]   = now_s;
     // settling only
@@ -520,6 +520,6 @@ void Freeze(bool on)
 bool Frozen() { return wfc::Frozen(); }
 
 float Level() { return voices::Level(); }
-bool  TookBreak() { return wfc::TookBreak(); }
+bool  PopBreak() { return wfc::PopBreak(); }
 
 }  // namespace synth

@@ -425,7 +425,7 @@ int RandomModOpt()
 // ---------------------------------------------------------------- the knobs
 
 Knobs&        K() { return knob; }
-bool          TookBreak()
+bool          PopBreak()
 {
     const bool was = broke;
     broke          = false;
@@ -570,7 +570,7 @@ int ShownTile(int v) { return shown_tile[v]; }
 int ShownMod(int v) { return shown_mod[v]; }
 int ShownSkew(int v) { return shown_skew[v]; }
 
-int TakeFlash(int v)
+int PopFlash(int v)
 {
     const int was = flash[v];
     flash[v]      = 0;

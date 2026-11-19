@@ -1,6 +1,11 @@
-// P03..P09 play and report force, P00/P02 octave, P01 scale, P10/P11 volume.
-// S30..S35 on ADC 0..5, faders S36/S37 on ADC 6,7. S07/S08 freeze / latch,
-// S09/S10 mod source. Control runs in the main loop: the engine is not reentrant.
+// P03..P09  play, and report force
+// P00/P02   octave down, up
+// P01       scale
+// P10/P11   volume down, up
+// S30..S35  knobs, on ADC 0..5
+// S36/S37   faders, on ADC 6,7
+// S07/S08   freeze, latch
+// S09/S10   mod source
 
 #pragma once
 
@@ -26,6 +31,6 @@ void PollPads();
 bool PadsOk();
 
 // once per octave or volume pad touch, for the LED. 2 = already at the end.
-int TakeBlink();
+int PopBlink();
 
 }  // namespace panel
