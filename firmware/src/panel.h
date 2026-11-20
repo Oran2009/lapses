@@ -19,16 +19,13 @@ constexpr int kPads = 12;
 constexpr int kPollDiv = 4;
 
 // sets AnalogControl's slew; wrong if guessed
-bool Init(daisy::DaisySeed& hw, float poll_rate);
+void Init(daisy::DaisySeed& hw, float poll_rate);
 
 // knobs, switches, pads edge-triggered into synth
 void Poll();
 
 // separate from Poll so the two bursts land on different blocks
 void PollPads();
-
-// false if the MPR121 never answered; pads read untouched
-bool PadsOk();
 
 // once per octave or volume pad touch, for the LED. 2 = already at the end.
 // reading clears it

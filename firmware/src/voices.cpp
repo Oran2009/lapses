@@ -24,13 +24,6 @@ constexpr float kAmp[kPartials]   = {1.0f, 1.0f, 1.0f, 1.0f,
 // cents a re-roll
 constexpr float kWander = 1.6f;
 
-// what drives the mod; all three destinations move
-enum
-{
-    kModStep = 0,   // up: jump and hold
-    kModFollow,     // centre: the instrument as it was
-    kModLfo         // down: a sine
-};
 int mod_mode = kModFollow;   // the switch at rest
 
 float sr        = 48000.0f;
@@ -189,7 +182,7 @@ struct Voice
     float    out_lvl;          // and the finished value, for the duck
     // tap at the last block's end; -1 unset
     float    ds_p, ds2_p;
-    // what Process resolved, for the display
+    // what Process resolved, for readback
     float    eff_dly, eff_fb, eff_pre, pan_now, depth_now;
     float    m_dly, m_dly_t;
     float    m_fb, m_fb_t;
@@ -375,7 +368,6 @@ void Init(float sample_rate, int block_size)
 }
 
 void SetModMode(int m) { mod_mode = m >= 0 && m <= kModLfo ? m : kModFollow; }
-int  ModMode() { return mod_mode; }
 
 
 void SetPitch(int i, float hz, float ref, bool snap)
@@ -736,7 +728,7 @@ void Process(float* out_l, float* out_r, int n)
         // changes grit, not level
         preg[i] *= 1.0f + kLinkDrv * link_env * link_g;
 
-        // report the louder, for the display
+        // report the louder
         vo.eff_dly = (xf[i] > 0.5f ? ng : dg) * inv_sr;
         vo.eff_fb  = fbg[i];
         vo.eff_pre = preg[i];

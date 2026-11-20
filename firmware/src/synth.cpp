@@ -186,14 +186,6 @@ void SyncSounding(double now)
 
 }  // namespace
 
-const char* KnobName(int i)
-{
-    static const char* n[kKnobs]
-        = {"Delay",   "Feedback", "Distortion", "Filter", "Mod",
-           "Control", "Unrest",   "Hold",       "Link",   "Shimmer"};
-    return i >= 0 && i < kKnobs ? n[i] : "?";
-}
-
 void Init(float sample_rate, int block_size)
 {
     sr    = sample_rate;
@@ -296,7 +288,7 @@ void SetPressure(int pad, float p)
         peak[pad]  = p;
         const int v = kPadVoice[pad];
         if(v >= 0)
-            wfc::BreakRule(-1, v / wfc::kGroupSize, 0.0f, now_s, v);
+            wfc::BreakRule(-1, 0.0f, now_s, v);
     }
     // after the test, so a push is measured from where the finger was
     const float dt = (float)(now_s - rest_at[pad]);
@@ -306,11 +298,6 @@ void SetPressure(int pad, float p)
     if(dt > 0.0f)
         rest[pad] += (p - rest[pad])
                      * (1.0f - expf(-dt / (p > rest[pad] ? up : kRestDn)));
-}
-
-float PressureRest(int pad)
-{
-    return (pad >= 0 && pad < kPads && rest[pad] > 0.0f) ? rest[pad] : 0.0f;
 }
 
 float Pressure(int pad)
@@ -359,8 +346,6 @@ void Latch(bool on)
     SyncSounding(now_s);
 }
 
-bool Latched(int p) { return latched[p]; }
-
 bool ShiftOctave(int delta)
 {
     const int was = octave;
@@ -377,13 +362,6 @@ int Octave() { return octave; }
 // next press only, via pad_hz
 void NextScale() { scale = (scale + 1) % kScales; }
 int  Scale() { return scale; }
-const char* ScaleName()
-{
-    static const char* const kName[kScales]
-        = {"minor", "major", "harmonic", "fourths"};
-    return kName[scale];
-}
-
 bool ShiftGain(int delta)
 {
     const int was = gain_step;
@@ -509,16 +487,11 @@ void Process(float* l, float* r, int n)
         idle = true;
 }
 
-void Break() { wfc::BreakRule(-1, 0.0f, now_s); }
-void Settle() { wfc::Heal(now_s); }
-
 void Freeze(bool on)
 {
     user_freeze = on;
     wfc::SetFrozen(on);
 }
-bool Frozen() { return wfc::Frozen(); }
-
 float Level() { return voices::Level(); }
 bool  Broke() { return wfc::Broke(); }
 

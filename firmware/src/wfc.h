@@ -7,11 +7,8 @@
 
 namespace wfc
 {
-// one voice per pad, one cluster; kGroups stays at 1
-constexpr int kVoices    = 7;
-constexpr int kGroups    = 1;
-constexpr int kGroupSize = kVoices / kGroups;
-inline int    GroupOf(int v) { return v / kGroupSize; }
+// one voice per pad, one cluster
+constexpr int kVoices = 7;
 constexpr int kPads   = 7;
 
 // base-time multiples on a 1/6 grid, so any set is related
@@ -70,8 +67,6 @@ struct Violation
     int       v[kVoices + 1];
 };
 
-const char* BreakName(BreakType t);
-
 // ---------------------------------------------------------------- the knobs
 
 Knobs&      K();
@@ -83,18 +78,14 @@ const Limits& Lim();
 
 float DelayBase();
 float DelayGlide();
+// the gap between one voice of a wave changing and the next
 float HopSeconds();
-// S36: the gap between one voice of a wave changing and the next
-void  SetRipple(float r);
 // what voice v puts on the bus, so a break picks one that sounds
 void  SetLevel(int v, float l);
-float Ripple();
 float ReleaseT();
 float AttackT();
 float ModSpeed0();
 float FbMul();
-// how far the join inflates the feedback the rules read
-float ChargeMul();
 float DrvMul();
 float ModMul();
 float LoopCut();
@@ -113,16 +104,11 @@ void Init(uint32_t seed);
 
 // what sounds and when it started, for the wave order
 void  SetSounding(int v, bool on, double now);
-// joined: charged the louder group's load
-void  SetJoined(bool on, double now);
 bool  Sounding(int v);
-// for the wave order and voice stealing
-double StartedAt(int v);
 
 // what WFC has decided
 int  Tile(int v);
 int  Mod(int v);
-int  Skew(int v);
 
 // what the audio has reached; the wave arrives over time
 int  ShownTile(int v);
@@ -142,11 +128,9 @@ void Pass(int v, double now);
 void RerollTail(int v, double now);
 // nothing pinned: after a knob move, a strictness change or a break
 void Heal(double now);
-void Heal(int group, double now);
-// let one rule go; type < 0 picks at random
-void BreakRule(int type, float offset, double now);
-// `prefer` names the voice the break lands on, -1 to pick
-void BreakRule(int type, int group, float offset, double now, int prefer = -1);
+// let one rule go; type < 0 picks at random, `prefer` names the voice it
+// lands on
+void BreakRule(int type, float offset, double now, int prefer = -1);
 // rules change now, the repair 350 ms after the last move
 void KnobsMoved(double now);
 
@@ -156,9 +140,9 @@ void Tick(double now);
 // queue overflows; nonzero means shown_* is stale
 int EventsDropped();
 
-// from the SHOWN state; group >= 0 judges one
+// from the SHOWN state
 constexpr int kMaxViolations
     = kVoices * 4 + kVoices * (kVoices - 1) / 2 + 2;
-int  Diagnose(Violation* out, int max, int group = -1);
+int  Diagnose(Violation* out, int max);
 
 }  // namespace wfc

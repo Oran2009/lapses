@@ -33,7 +33,7 @@ int   press_turn             = 0;
 
 }  // namespace
 
-bool Init(DaisySeed& hw, float poll_rate)
+void Init(DaisySeed& hw, float poll_rate)
 {
     AdcChannelConfig cfg[kAnalog];
     cfg[0].InitSingle(seed::A0);
@@ -75,10 +75,7 @@ bool Init(DaisySeed& hw, float poll_rate)
             mpr.WriteRegister(kReg[i][0], kReg[i][1]);
         System::Delay(80);   // autoconfiguration settles
     }
-    return pads_ok;
 }
-
-bool PadsOk() { return pads_ok; }
 
 void PollPads()
 {
@@ -86,7 +83,7 @@ void PollPads()
         return;
     pad_state = mpr.Touched();
 
-// one per poll
+    // one per poll
     const int p = press_turn;
     press_turn  = (press_turn + 1) % synth::kPads;
     const int e = p + kFirstPad;
@@ -119,22 +116,23 @@ int Blink()
 
 void Poll()
 {
-    for(int i = 0; i < kAnalog; i++)
-        analog[i].Process();
     // S30 Mod, S31 Feedback, S32 Delay, S33 Distortion, S34 Filter,
     // S35 Link, S36 Shimmer, S37 Hold.
     static const int kKnobOf[kAnalog] = {4, 1, 0, 2, 3, 8, 9, 7};
     for(int i = 0; i < kAnalog; i++)
+    {
+        analog[i].Process();
         synth::SetKnob(kKnobOf[i], analog[i].Value());
+    }
     // S07/S08 up freezes the solver, down latches
     const int sa = switch_a.Read();
     synth::Freeze(sa == Switch3::POS_UP);
     synth::Latch(sa == Switch3::POS_DOWN);
     // S09/S10 up steps, centre the follower, down an LFO
     const int sb = switch_b.Read();
-    voices::SetModMode(sb == Switch3::POS_UP      ? 0
-                       : sb == Switch3::POS_DOWN ? 2
-                                                 : 1);
+    voices::SetModMode(sb == Switch3::POS_UP     ? voices::kModStep
+                       : sb == Switch3::POS_DOWN ? voices::kModLfo
+                                                 : voices::kModFollow);
 
     const uint16_t changed = (uint16_t)(pad_state ^ last_pads);
     for(int i = 0; i < kPads; i++)

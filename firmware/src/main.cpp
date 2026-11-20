@@ -44,7 +44,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     blocks_done++;
     const uint32_t t0 = System::GetUs();
 
-
     float l[kBlock], r[kBlock];
     synth::Process(l, r, (int)size);
     for(size_t i = 0; i < size; i++)
@@ -52,7 +51,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
         out[0][i] = l[i];
         out[1][i] = r[i];
     }
-// 90% of the budget
+    // 90% of the budget
     const uint32_t us = System::GetUs() - t0;
     if(blocks_done > 1000 && us * 10 > block_us * 9)
         over_n++;

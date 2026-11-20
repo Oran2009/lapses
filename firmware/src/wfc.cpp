@@ -37,8 +37,6 @@ inline float Smooth(float a, float b, float x)
 
 Knobs  knob   = {0.6f, 0.5f, 0.3f, 0.55f, 0.5f, 0.7f, 0.2f, 0.0f, 0.0f, 0.0f};
 bool   frozen = false;
-// wave hop
-float  ripple = 0.02f;
 // so a break lands on an audible voice
 float  level[kVoices] = {};
 Limits limits = {};
@@ -76,52 +74,28 @@ struct Event
     double  t;
     int     v;
     int32_t seq;
-    int     kind;   // 2 = break, 1 = repair
+    bool    brk;
     Change  ch;
 };
 constexpr int kMaxEvents = 48;
 Event         events[kMaxEvents];
 int           n_events = 0, n_dropped = 0;
 
-double heal_at[kGroups], next_lapse[kGroups], next_unrest[kGroups];
+double heal_at = 0, next_lapse = 0, next_unrest = 0;
 
-bool  joined      = false;
 float solve_fm    = -1.0f;
 float table_fm    = -1.0f;
-constexpr float kChargeGain = 4.0f;
 double knob_settle = 0;
 
 // ------------------------------------------------------------- the sounding
 
-int Active(int* act, int group)
+int Active(int* act)
 {
     int n = 0;
     for(int v = 0; v < kVoices; v++)
-        if(sounding[v] && (group < 0 || GroupOf(v) == group))
+        if(sounding[v])
             act[n++] = v;
     return n;
-}
-
-// writes nothing, so any thread may call it
-float ChargedFb(int group)
-{
-    const float fm = FbMul();
-    if(!joined || group < 0)
-        return fm;
-    // louder group, own included
-    float gl[kGroups] = {};
-    for(int v = 0; v < kVoices; v++)
-        if(sounding[v])
-            gl[GroupOf(v)] += FL[TileF(shown_tile[v])];
-    float load = 0.0f;
-    for(int g = 0; g < kGroups; g++)
-        load = fmaxf(load, gl[g]);
-    // an empty table falls back to a louder default
-    const float cap = 0.98f
-                      * fminf(fminf(limits.Fself / FL[0],
-                                    limits.Fshare / FL[0]),
-                              limits.Lpeak / FL[0]);
-    return fmaxf(fm, fminf(fm * (1.0f + kChargeGain * load / kGroupSize), cap));
 }
 
 // multiple of the base time, skew included
@@ -141,9 +115,9 @@ float DrBudget(int n)
 }
 
 // frozen for the solve, read thousands of times
-void SetSolveGroup(int g)
+void SetSolveFb()
 {
-    solve_fm = ChargedFb(g);
+    solve_fm = FbMul();
     if(solve_fm != table_fm)
         tables_dirty = true;
 }
@@ -257,7 +231,7 @@ int Repair(const int* nodes, int n, const int* order, int fixed_v,
         int skipped = 0;
         // leave the unplaced voices room at the floor
         const float fmul = solve_fm, dmul = DrvMul();
-        // under Diagnose: the frozen charge rises with its own load
+        // strictly inside, or Diagnose flags what the solve just placed
         float       fleft = FbBudget(n) * 0.95f, dleft = DrBudget(n);
         if(fixed_v >= 0)
         {
@@ -356,7 +330,7 @@ bool RepairMod(const int* act, int n, int fixed_v, int fixed_opt,
 // ---------------------------------------------------------------- the wave
 
 // a replay, not propagation; newest first
-int ApplyWave(const Change* ch, const int* order, int n, int kind,
+int ApplyWave(const Change* ch, const int* order, int n, bool brk,
               float offset, double now)
 {
     const float iv = HopSeconds();
@@ -389,7 +363,7 @@ int ApplyWave(const Change* ch, const int* order, int n, int kind,
         if(!any)
             continue;
         if(n_events < kMaxEvents)
-            events[n_events++] = Event{t0 + (float)h * iv, v, seq, kind, e};
+            events[n_events++] = Event{t0 + (float)h * iv, v, seq, brk, e};
         else
             n_dropped++;
         changed++;
@@ -435,18 +409,15 @@ void          SetFrozen(bool on) { frozen = on; }
 bool          Frozen() { return frozen; }
 const Limits& Lim() { return limits; }
 
-float ChargeMul() { return ChargedFb(0) / FbMul(); }
 
 float DelayBase() { return 0.03f * powf(30.0f, knob.delay); }
 float DelayGlide() { return Clamp(DelayBase() * 0.6f, 0.02f, 0.5f); }
-float HopSeconds() { return Lerp(0.02f, 0.8f, ripple); }
-void  SetRipple(float r) { ripple = Clamp(r, 0.0f, 1.0f); }
+float HopSeconds() { return 0.0356f; }
 void  SetLevel(int v, float l)
 {
     if(v >= 0 && v < kVoices)
         level[v] = l;
 }
-float Ripple() { return ripple; }
 float ReleaseT() { return Clamp(DelayBase() * 6.5f, 0.45f, 6.5f); }
 float AttackT() { return 0.243f; }
 float ModSpeed0() { return Clamp(1.0f / (DelayBase() * 8.0f), 0.08f, 2.5f); }
@@ -459,13 +430,6 @@ float VoiceCutMul() { return Lerp(1.5f, 14.0f, knob.filter); }
 
 float LapseChance() { return Lerp(0.0f, 0.5f, knob.unrest); }
 float UnrestRate() { return Lerp(0.0f, 0.25f, knob.unrest); }
-
-const char* BreakName(BreakType t)
-{
-    static const char* n[kBreakTypes]
-        = {"echo", "swell", "fuzz"};
-    return (int)t < kBreakTypes ? n[t] : "?";
-}
 
 void RebuildRules()
 {
@@ -534,12 +498,10 @@ void Init(uint32_t seed)
     broke     = false;
     n_events  = 0;
     n_dropped = 0;
-    for(int g = 0; g < kGroups; g++)
-        heal_at[g] = next_lapse[g] = next_unrest[g] = 0;
+    heal_at = next_lapse = next_unrest = 0;
     knob_settle = 0;
     solve_fm    = -1.0f;
     frozen      = false;
-    joined      = false;
     RebuildRules();
 }
 
@@ -550,22 +512,11 @@ void SetSounding(int v, bool on, double now)
         started_at[v] = now;
 }
 
-void SetJoined(bool on, double now)
-{
-    if(on == joined)
-        return;
-    joined = on;
-    // charge changed: re-solve
-    for(int g = 0; g < kGroups; g++)
-        heal_at[g] = now;
-}
 bool  Sounding(int v) { return sounding[v]; }
-double StartedAt(int v) { return started_at[v]; }
 
 int EventsDropped() { return n_dropped; }
 int Tile(int v) { return tile[v]; }
 int Mod(int v) { return mod_opt[v]; }
-int Skew(int v) { return skew[v]; }
 int ShownTile(int v) { return shown_tile[v]; }
 int ShownMod(int v) { return shown_mod[v]; }
 int ShownSkew(int v) { return shown_skew[v]; }
@@ -581,10 +532,9 @@ bool Broke(int v)
 
 void Pass(int v, double now)
 {
-    const int g = GroupOf(v);
-    SetSolveGroup(g);
+    SetSolveFb();
     int       act[kVoices + 1];
-    int       n = Active(act, g);
+    int       n = Active(act);
     if(!InList(act, n, v))
         act[n++] = v;
 
@@ -635,10 +585,10 @@ void Pass(int v, double now)
             ch[m].mod = md[m];
     }
     ch[v].skew = 0;
-    ApplyWave(ch, order, no, 1, 0.0f, now);
+    ApplyWave(ch, order, no, false, 0.0f, now);
 
     if(Rand() < LapseChance())
-        BreakRule(-1, g, (float)(no + 1) * HopSeconds(), now);
+        BreakRule(-1, (float)(no + 1) * HopSeconds(), now);
 }
 
 void RerollTail(int v, double now)
@@ -657,17 +607,15 @@ void RerollTail(int v, double now)
     ch[v].tile      = RandomTile();
     ch[v].skew      = 0;
     const int order[1] = {v};
-    ApplyWave(ch, order, 1, 2, 0.0f, now);
+    ApplyWave(ch, order, 1, true, 0.0f, now);
 }
 
-void Heal(int g, double now)
+void Heal(double now)
 {
-    if(g < 0 || g >= kGroups)
-        return;
-    heal_at[g] = 0;
-    SetSolveGroup(g);
+    heal_at = 0;
+    SetSolveFb();
     int       act[kVoices];
-    const int n = Active(act, g);
+    const int n = Active(act);
     if(!n)
         return;
     int order[kVoices];
@@ -699,22 +647,14 @@ void Heal(int g, double now)
         ch[m].tile = have_line ? line[m] : -1;
         ch[m].mod  = have_mod ? md[m] : 0;
     }
-    ApplyWave(ch, order, n, 1, 0.0f, now);
+    ApplyWave(ch, order, n, false, 0.0f, now);
 }
 
-void Heal(double now)
+void BreakRule(int type, float offset, double now, int prefer)
 {
-    for(int g = 0; g < kGroups; g++)
-        Heal(g, now);
-}
-
-void BreakRule(int type, int g, float offset, double now, int prefer)
-{
-    if(g < 0 || g >= kGroups)
-        return;
-    SetSolveGroup(g);
+    SetSolveFb();
     int       act[kVoices];
-    const int n = Active(act, g);
+    const int n = Active(act);
     if(!n)
         return;
     if(type < 0 || type >= kBreakTypes)
@@ -782,7 +722,7 @@ void BreakRule(int type, int g, float offset, double now, int prefer)
             break;
     }
     // 0 = nothing moved: reroll
-    if(ApplyWave(ch, order, n, 2, offset, now) == 0)
+    if(ApplyWave(ch, order, n, true, offset, now) == 0)
     {
         for(int i = 0; i < kVoices; i++)
             ch[i] = NoChange();
@@ -790,15 +730,9 @@ void BreakRule(int type, int g, float offset, double now, int prefer)
         for(int i = 0; i < 8 && t == tile[a]; i++)
             t = RandomTile();
         ch[a].tile = t;
-        ApplyWave(ch, order, n, 2, offset, now);
+        ApplyWave(ch, order, n, true, offset, now);
     }
-    heal_at[g] = now + offset + 3.0f + Rand() * 4.0f;
-}
-
-void BreakRule(int type, float offset, double now)
-{
-    for(int g = 0; g < kGroups; g++)
-        BreakRule(type, g, offset, now, -1);
+    heal_at = now + offset + 3.0f + Rand() * 4.0f;
 }
 
 void KnobsMoved(double now)
@@ -832,7 +766,7 @@ void Tick(double now)
             seq_mod[e.v]   = e.seq;
             shown_mod[e.v] = (int8_t)e.ch.mod;
         }
-        if(e.kind == 2)
+        if(e.brk)
             broke = broke_v[e.v] = true;
     }
     n_events = keep;
@@ -840,53 +774,41 @@ void Tick(double now)
     if(knob_settle && now > knob_settle)
     {
         knob_settle = 0;
-        for(int g = 0; g < kGroups; g++)
-        {
-            int act[kVoices];
-            if(Active(act, g))
-                Heal(g, now);
-        }
+        int a[kVoices];
+        if(Active(a))
+            Heal(now);
     }
     if(frozen)
         return;
-    for(int g = 0; g < kGroups; g++)
-    {
-        int       act[kVoices];
-        const int n = Active(act, g);
-        if(heal_at[g] && now > heal_at[g])
-            Heal(g, now);
 
-        if(n && LapseChance() > 0.01f && now > next_lapse[g])
-        {
-            if(next_lapse[g] > 0 && Rand() < 0.6f)
-                BreakRule(-1, g, 0.0f, now);
-            next_lapse[g]
-                = now + (6.0f + Rand() * 10.0f) / (0.15f + LapseChance() * 4);
-        }
-        if(UnrestRate() > 0.01f && n && now > next_unrest[g])
-        {
-            if(next_unrest[g] > 0)
-                Pass(act[RandInt(n)], now);
-            next_unrest[g] = now + (1.0f / UnrestRate()) * (0.5f + Rand());
-        }
+    int       act[kVoices];
+    const int n = Active(act);
+    if(heal_at && now > heal_at)
+        Heal(now);
+
+    if(n && LapseChance() > 0.01f && now > next_lapse)
+    {
+        if(next_lapse > 0 && Rand() < 0.6f)
+            BreakRule(-1, 0.0f, now);
+        next_lapse
+            = now + (6.0f + Rand() * 10.0f) / (0.15f + LapseChance() * 4);
+    }
+    if(UnrestRate() > 0.01f && n && now > next_unrest)
+    {
+        if(next_unrest > 0)
+            Pass(act[RandInt(n)], now);
+        next_unrest = now + (1.0f / UnrestRate()) * (0.5f + Rand());
     }
 }
 
 // ----------------------------------------------------------- what is broken
 
-int Diagnose(Violation* out, int max, int group)
+int Diagnose(Violation* out, int max)
 {
-    if(group < 0)
-    {
-        int cnt = 0;
-        for(int g = 0; g < kGroups; g++)
-            cnt += Diagnose(out + cnt, max - cnt, g);
-        return cnt;
-    }
     int         act[kVoices];
-    const int   n   = Active(act, group);
+    const int   n   = Active(act);
     int         cnt = 0;
-    const float fm = ChargedFb(group), dm = DrvMul(), base = DelayBase();
+    const float fm = FbMul(), dm = DrvMul(), base = DelayBase();
 
     for(int i = 0; i < n && cnt < max; i++)
     {

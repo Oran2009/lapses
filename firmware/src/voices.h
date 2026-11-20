@@ -11,9 +11,14 @@ namespace voices
 constexpr int kDelayMax = 96000;
 
 
-// S09/S10 picks what drives the mod: 0 steps, 1 follower, 2 LFO
+// S09/S10 picks what drives the mod
+enum
+{
+    kModStep = 0,   // up: jump and hold
+    kModFollow,     // centre: the instrument as it was
+    kModLfo         // down: a sine
+};
 void SetModMode(int m);
-int  ModMode();
 
 void Init(float sample_rate, int block_size);
 
@@ -24,7 +29,7 @@ float Pitch(int v);
 // one control tick (~1 kHz): envelopes, partial wander, mods, glide
 void Control(double now, float dt);
 
-// bit g set: HOLD is group g's amplitude floor
+// set: HOLD is the amplitude floor
 
 // a voice HOLD keeps sounding is still released here
 void SetPadHeld(int v, bool on);

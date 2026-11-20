@@ -17,12 +17,9 @@ void Release(int pad);
 bool PadOn(int pad);
 // S07/S08 down: the pads held then stay down
 void Latch(bool on);
-bool Latched(int pad);
-// 0..1 contact force; leaning past the threshold breaks the pad's group
+// 0..1 contact force; leaning past the threshold breaks a rule
 void  SetPressure(int pad, float p);
 float Pressure(int pad);
-// resting force a lean is measured against
-float PressureRest(int pad);
 
 // clamped to +-2 octaves; true when it moved
 bool ShiftOctave(int delta);
@@ -32,14 +29,12 @@ int  Octave();
 constexpr int kScales = 4;
 void        NextScale();
 int         Scale();
-const char* ScaleName();
 
 constexpr int kKnobs = 10;   // six, plus Unrest, Hold, Link, Shimmer
 
 // 0..1 each; rebuilds the rules and schedules the debounced heal
 void SetKnob(int i, float v);
 float Knob(int i);
-const char* KnobName(int i);
 
 // advance the control side, once per audio block
 void Control(double now);
@@ -58,13 +53,8 @@ bool Broke();
 bool ShiftGain(int delta);
 float GainDb();
 
-// break a rule now, or settle everything now
-void Break();
-void Settle();
-
 // hold the solver where it is
 void Freeze(bool on);
-bool Frozen();
 
 // which voice each pad drives, -1 none
 int PadVoice(int pad);
