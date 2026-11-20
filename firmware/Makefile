@@ -1,11 +1,6 @@
-# The Touch 2 build: make, from this directory.
-#
-# libDaisy and DaisySP are not vendored. Override if they move:
-# make LIBDAISY_DIR=... DAISYSP_DIR=...
-
 TARGET = lapses
 
-# Internal flash, no bootloader on the board. -O3 overflows the 128 KB; -O2 is 86%.
+# Internal flash
 APP_TYPE = BOOT_NONE
 
 OPT = -O2
@@ -24,5 +19,8 @@ SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core
 
 include $(SYSTEM_FILES_DIR)/Makefile
 
-# Relink when libDaisy changes: the app does not otherwise depend on it
 $(BUILD_DIR)/$(TARGET).elf: $(LIBDAISY_DIR)/build/libdaisy.a
+
+all: ../lapses.bin
+../lapses.bin: $(BUILD_DIR)/$(TARGET).bin
+	cp $< $@

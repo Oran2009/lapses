@@ -10,3 +10,4 @@ host/
 monitor.py
 /Makefile
 faceplate.svg
+!/lapses.bin
