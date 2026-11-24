@@ -7,6 +7,8 @@
 
 #include "daisy_seed.h"
 
+#include <cstdio>
+
 using namespace daisy;
 
 namespace
@@ -134,10 +136,16 @@ int main()
             if(now - over_at >= 1000)
             {
                 strobe  = over_n >= 4 ? 1 : (lag_n >= 4 ? 2 : 0);
-                // blocks until the host takes it
-                hw.PrintLine("cb %u us over %u | ctl %u us lag %u",
-                             (unsigned)cb_max, (unsigned)over_n,
-                             (unsigned)ctl_max, (unsigned)lag_n);
+                // the logger goes blocking once a terminal has answered
+                char      line[64];
+                const int n = snprintf(
+                    line, sizeof(line), "cb %u us over %u | ctl %u us lag %u\r\n",
+                    (unsigned)cb_max, (unsigned)over_n, (unsigned)ctl_max,
+                    (unsigned)lag_n);
+                if(n > 0)
+                    hw.usb_handle.TransmitInternal(
+                        (uint8_t*)line,
+                        n < (int)sizeof(line) ? n : (int)sizeof(line));
                 over_n  = 0;
                 lag_n   = 0;
                 cb_max  = 0;
