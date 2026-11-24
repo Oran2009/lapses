@@ -3,6 +3,7 @@ TARGET = lapses
 # Internal flash
 APP_TYPE = BOOT_NONE
 
+# -O3 fits at 98%, with nothing measurable to show for it
 OPT = -O2
 
 CPP_SOURCES = src/main.cpp src/panel.cpp src/synth.cpp src/voices.cpp \

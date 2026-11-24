@@ -7,8 +7,6 @@
 
 #include "daisy_seed.h"
 
-#include <cstdio>
-
 using namespace daisy;
 
 namespace
@@ -31,8 +29,6 @@ volatile uint16_t  over_n   = 0;
 constexpr uint32_t kMaxLag  = 8;
 // different fixes, so counted apart
 volatile uint16_t  lag_n    = 0;
-volatile uint16_t  cb_max   = 0;
-uint16_t           ctl_max  = 0;
 int                strobe   = 0;
 uint32_t           over_at  = 0;
 
@@ -57,8 +53,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     const uint32_t us = System::GetUs() - t0;
     if(blocks_done > 1000 && us * 10 > block_us * 9)
         over_n++;
-    if(us > cb_max)
-        cb_max = (uint16_t)(us > 65535 ? 65535 : us);
 }
 
 }  // namespace
@@ -66,8 +60,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
 int main()
 {
     hw.Init();
-    // not blocking
-    hw.StartLog(false);
     hw.SetAudioBlockSize(kBlock);
     hw.SetAudioSampleRate(kRate);
 
@@ -109,13 +101,7 @@ int main()
                 panel::PollPads();
             else if((blocks_seen % panel::kPollDiv) == 2)
                 panel::Poll();
-            {
-                const uint32_t c0 = System::GetUs();
-                synth::Control(now_s);
-                const uint32_t cu = System::GetUs() - c0;
-                if(cu > ctl_max)
-                    ctl_max = (uint16_t)(cu > 65535 ? 65535 : cu);
-            }
+            synth::Control(now_s);
 
             const uint32_t now = System::GetNow();
             if(const int b = panel::Blink())
@@ -136,20 +122,8 @@ int main()
             if(now - over_at >= 1000)
             {
                 strobe  = over_n >= 4 ? 1 : (lag_n >= 4 ? 2 : 0);
-                // the logger goes blocking once a terminal has answered
-                char      line[64];
-                const int n = snprintf(
-                    line, sizeof(line), "cb %u us over %u | ctl %u us lag %u\r\n",
-                    (unsigned)cb_max, (unsigned)over_n, (unsigned)ctl_max,
-                    (unsigned)lag_n);
-                if(n > 0)
-                    hw.usb_handle.TransmitInternal(
-                        (uint8_t*)line,
-                        n < (int)sizeof(line) ? n : (int)sizeof(line));
                 over_n  = 0;
                 lag_n   = 0;
-                cb_max  = 0;
-                ctl_max = 0;
                 over_at = now;
             }
             hw.SetLed(strobe ? ((now / (strobe == 1 ? 60 : 300)) & 1)
